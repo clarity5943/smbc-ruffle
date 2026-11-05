@@ -7,7 +7,7 @@ use crate::util::{
     winit_to_ruffle_text_control,
 };
 use anyhow::Error;
-use gilrs::{Event, EventType, Gilrs};
+use gilrs::{Axis, Event, EventType, Gilrs};
 use ruffle_core::FloatDuration;
 use ruffle_core::PlayerEvent;
 use ruffle_core::events::{ImeEvent, ImeNotification, PlayerNotification};
@@ -49,9 +49,41 @@ struct MainWindow {
     time: Instant,
     next_frame_time: Option<Instant>,
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
+    /// Left-stick directions currently reported as D-pad presses: up, down, left, right.
+    stick_dirs: [bool; 4],
+    stick_axes: [f32; 2],
 }
 
 impl MainWindow {
+    /// Turns left-stick movement into D-pad button presses (with hysteresis).
+    fn update_stick(&mut self) {
+        use ruffle_core::events::GamepadButton;
+        const ON: f32 = 0.5;
+        const OFF: f32 = 0.35;
+        let [x, y] = self.stick_axes;
+        // gilrs reports up as positive Y.
+        let wanted = [y, -y, -x, x];
+        let buttons = [
+            GamepadButton::DPadUp,
+            GamepadButton::DPadDown,
+            GamepadButton::DPadLeft,
+            GamepadButton::DPadRight,
+        ];
+        for i in 0..4 {
+            let held = self.stick_dirs[i];
+            let now = if held { wanted[i] > OFF } else { wanted[i] > ON };
+            if now != held {
+                self.stick_dirs[i] = now;
+                let button = buttons[i];
+                self.handle_player_event(if now {
+                    PlayerEvent::GamepadButtonDown { button }
+                } else {
+                    PlayerEvent::GamepadButtonUp { button }
+                });
+            }
+        }
+    }
+
     pub fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         if matches!(event, WindowEvent::RedrawRequested) {
             // Don't render when nobody can see the result: while minimized, the
@@ -216,6 +248,23 @@ impl MainWindow {
                     return;
                 }
 
+                // F11 / Alt+Enter toggle fullscreen.
+                if event.state == ElementState::Pressed
+                    && (event.logical_key == Key::Named(NamedKey::F11)
+                        || (event.logical_key == Key::Named(NamedKey::Enter)
+                            && self.modifiers.state().alt_key()))
+                {
+                    if !event.repeat {
+                        let fullscreen = self.gui.window().fullscreen().is_some();
+                        let _ = self.event_loop_proxy.send_event(if fullscreen {
+                            RuffleEvent::ExitFullScreen
+                        } else {
+                            RuffleEvent::EnterFullScreen
+                        });
+                    }
+                    return;
+                }
+
                 // Handle escaping from fullscreen.
                 if let KeyEvent {
                     state: ElementState::Pressed,
@@ -364,8 +413,22 @@ impl MainWindow {
         // moves, so that they can get coalesced properly.
         self.flush_mouse_move();
 
-        if let Some(Event { event, .. }) = gilrs.and_then(|gilrs| gilrs.next_event()) {
+        // Drain every pending gamepad event (stick motion produces many).
+        let mut gilrs = gilrs;
+        while let Some(Event { event, .. }) = gilrs.as_mut().and_then(|g| g.next_event()) {
             match event {
+                EventType::AxisChanged(Axis::LeftStickX, value, _) => {
+                    self.stick_axes[0] = value;
+                    self.update_stick();
+                }
+                EventType::AxisChanged(Axis::LeftStickY, value, _) => {
+                    self.stick_axes[1] = value;
+                    self.update_stick();
+                }
+                EventType::Disconnected => {
+                    self.stick_axes = [0.0, 0.0];
+                    self.update_stick();
+                }
                 EventType::ButtonPressed(button, _) => {
                     if let Some(button) = gilrs_button_to_gamepad_button(button) {
                         self.handle_player_event(PlayerEvent::GamepadButtonDown { button });
@@ -505,7 +568,11 @@ impl ApplicationHandler<RuffleEvent> for App {
             #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
             let mut window_attributes = WindowAttributes::default()
                 .with_visible(false)
-                .with_title("Ruffle")
+                .with_title(if crate::smbc::is_bundle() {
+                    crate::smbc::TITLE
+                } else {
+                    "Ruffle"
+                })
                 .with_window_icon(Some(icon))
                 .with_min_inner_size(min_window_size);
 
@@ -591,6 +658,8 @@ impl ApplicationHandler<RuffleEvent> for App {
                 time: Instant::now(),
                 next_frame_time: None,
                 event_loop_proxy,
+                stick_dirs: [false; 4],
+                stick_axes: [0.0, 0.0],
             });
         }
     }

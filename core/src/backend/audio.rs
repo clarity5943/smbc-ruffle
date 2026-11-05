@@ -2,7 +2,10 @@ use std::any::Any;
 
 use crate::{
     avm1::{NativeObject, Object as Avm1Object},
-    avm2::{Avm2, EventObject as Avm2EventObject, SoundChannelObject},
+    avm2::{
+        Activation as Avm2Activation, Avm2, EventObject as Avm2EventObject,
+        Object as Avm2Object, SoundChannelObject,
+    },
     context::UpdateContext,
     display_object::{self, DisplayObject, MovieClip, TDisplayObject},
     string::AvmString,
@@ -42,6 +45,90 @@ use web_time::Duration;
 new_key_type! {
     pub struct SoundHandle;
     pub struct SoundInstanceHandle;
+}
+
+/// Shared sample queue for a dynamically generated sound
+/// (`flash.media.Sound` driven by `SampleDataEvent`).
+///
+/// The player thread pushes 44.1 kHz stereo frames into it after each
+/// `sampleData` event, and the audio mixer pulls frames out of it.
+#[derive(Clone, Default)]
+pub struct DynamicSoundBuffer(std::sync::Arc<std::sync::Mutex<DynamicSoundBufferInner>>);
+
+#[derive(Default)]
+struct DynamicSoundBufferInner {
+    frames: std::collections::VecDeque<[i16; 2]>,
+    /// No more data will be pushed; the sound ends once `frames` is drained.
+    finished: bool,
+    /// Total frames handed to the mixer so far.
+    consumed: u64,
+}
+
+impl DynamicSoundBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DynamicSoundBufferInner> {
+        match self.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Number of frames waiting to be played.
+    pub fn buffered(&self) -> usize {
+        self.lock().frames.len()
+    }
+
+    pub fn push_frames(&self, frames: impl IntoIterator<Item = [i16; 2]>) {
+        self.lock().frames.extend(frames);
+    }
+
+    pub fn finish(&self) {
+        self.lock().finished = true;
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.lock().finished
+    }
+
+    /// Moves up to `max` frames into `out`. Returns `(moved, exhausted)` where
+    /// `exhausted` means the sound is finished and fully drained.
+    pub fn drain_into(
+        &self,
+        out: &mut std::collections::VecDeque<[i16; 2]>,
+        max: usize,
+    ) -> (usize, bool) {
+        let mut inner = self.lock();
+        let n = inner.frames.len().min(max);
+        out.extend(inner.frames.drain(..n));
+        inner.consumed += n as u64;
+        (n, inner.finished && inner.frames.is_empty())
+    }
+
+    pub fn consumed(&self) -> u64 {
+        self.lock().consumed
+    }
+}
+
+/// Converts the raw bytes of a `SampleDataEvent.data` ByteArray
+/// (32-bit float stereo pairs) into 16-bit frames.
+pub fn sample_data_to_frames(bytes: &[u8], little_endian: bool) -> Vec<[i16; 2]> {
+    let to_i16 = |chunk: &[u8]| -> i16 {
+        let arr = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        let f = if little_endian {
+            f32::from_le_bytes(arr)
+        } else {
+            f32::from_be_bytes(arr)
+        };
+        let f = if f.is_finite() { f.clamp(-1.0, 1.0) } else { 0.0 };
+        (f * 32767.0) as i16
+    };
+    bytes
+        .chunks_exact(8)
+        .map(|c| [to_i16(&c[0..4]), to_i16(&c[4..8])])
+        .collect()
 }
 
 pub type DecodeError = decoders::Error;
@@ -140,6 +227,15 @@ pub trait AudioBackend: Any {
         stream_data: Substream,
         stream_info: &SoundStreamInfo,
     ) -> Result<SoundInstanceHandle, DecodeError>;
+
+    /// Starts a dynamically generated sound (AS3 `SampleDataEvent` sounds).
+    /// Frames are pulled from `buffer` as they are pushed by the player.
+    fn start_dynamic_sound(
+        &mut self,
+        _buffer: DynamicSoundBuffer,
+    ) -> Result<SoundInstanceHandle, DecodeError> {
+        Err(DecodeError::TooManySounds)
+    }
 
     /// Stops a playing sound instance.
     /// No-op if the sound is not playing.
@@ -388,6 +484,7 @@ impl<'gc> AudioManager<'gc> {
 
     /// Update state of active sounds. Should be called once per frame.
     pub fn update_sounds(context: &mut UpdateContext<'gc>) {
+        Self::fill_dynamic_sounds(context);
         let mc = context.gc();
 
         // We can't use 'context' to construct an event inside the
@@ -475,6 +572,7 @@ impl<'gc> AudioManager<'gc> {
                 avm1_object,
                 avm2_object: None,
                 stream_start_frame: None,
+                dynamic: None,
             };
 
             if let Some(transform) = transform {
@@ -487,6 +585,128 @@ impl<'gc> AudioManager<'gc> {
         } else {
             None
         }
+    }
+
+    /// Frames we try to keep queued for each dynamic sound (~140 ms at 44.1 kHz).
+    pub const DYNAMIC_SOUND_TARGET_FRAMES: usize = 6144;
+
+    /// Flash ends a dynamic sound when a `sampleData` handler supplies fewer
+    /// than this many sample frames.
+    pub const DYNAMIC_SOUND_MIN_FRAMES: usize = 2048;
+
+    /// Starts a sound whose audio is produced by `SampleDataEvent` handlers on `sound`.
+    pub fn start_dynamic_sound(
+        &mut self,
+        audio: &mut dyn AudioBackend,
+        sound: Avm2Object<'gc>,
+        transform: Option<display_object::SoundTransform>,
+    ) -> Option<SoundInstanceHandle> {
+        if self.sounds.len() >= Self::MAX_SOUNDS {
+            return None;
+        }
+        let buffer = DynamicSoundBuffer::new();
+        let handle = audio
+            .start_dynamic_sound(buffer.clone())
+            .map_err(|e| tracing::warn!("Cannot start dynamic sound: {e}"))
+            .ok()?;
+        let mut instance = SoundInstance {
+            sound: None,
+            instance: handle,
+            display_object: None,
+            transform: display_object::SoundTransform::default(),
+            avm1_object: None,
+            avm2_object: None,
+            stream_start_frame: None,
+            dynamic: Some(DynamicSource {
+                sound,
+                buffer,
+                position: 0.0,
+            }),
+        };
+        if let Some(transform) = transform {
+            instance.transform = transform;
+        }
+        audio.set_sound_transform(handle, self.transform_for_sound(&instance));
+        self.sounds.push(instance);
+        Some(handle)
+    }
+
+    /// Requests more audio from every dynamic sound that is running low.
+    pub fn fill_dynamic_sounds(context: &mut UpdateContext<'gc>) {
+        let pending: Vec<(SoundInstanceHandle, DynamicSource<'gc>)> = context
+            .audio_manager
+            .sounds
+            .iter()
+            .filter_map(|s| s.dynamic.clone().map(|d| (s.instance, d)))
+            .collect();
+
+        for (instance, source) in pending {
+            let mut position = source.position;
+            let mut rounds = 0;
+            while !source.buffer.is_finished()
+                && source.buffer.buffered() < Self::DYNAMIC_SOUND_TARGET_FRAMES
+                && rounds < 4
+            {
+                rounds += 1;
+                // The handler may have stopped this sound in an earlier round.
+                if !context.audio_manager.is_sound_playing(instance) {
+                    break;
+                }
+                let frames = Self::request_sample_data(context, source.sound, position);
+                let n = frames.len();
+                position += n as f64;
+                source.buffer.push_frames(frames);
+                if n < Self::DYNAMIC_SOUND_MIN_FRAMES {
+                    source.buffer.finish();
+                }
+            }
+            if let Some(s) = context
+                .audio_manager
+                .sounds
+                .iter_mut()
+                .find(|s| s.instance == instance)
+                && let Some(d) = &mut s.dynamic
+            {
+                d.position = position;
+            }
+        }
+    }
+
+    fn request_sample_data(
+        context: &mut UpdateContext<'gc>,
+        sound: Avm2Object<'gc>,
+        position: f64,
+    ) -> Vec<[i16; 2]> {
+        use crate::avm2::bytearray::{ByteArrayStorage, Endian};
+        use crate::avm2::object::ByteArrayObject;
+
+        let storage = ByteArrayStorage::new(context);
+        let bytearray = ByteArrayObject::from_storage(context, storage);
+        let mut activation = Avm2Activation::from_nothing(context);
+        let class = activation.avm2().classes().sampledataevent;
+        let event_type = AvmString::new_ascii_static(activation.gc(), b"sampleData");
+        let event = Avm2EventObject::from_class_and_args(
+            &mut activation,
+            class,
+            &[
+                event_type.into(),
+                false.into(),
+                false.into(),
+                position.into(),
+                Avm2Object::from(bytearray).into(),
+            ],
+        );
+        Avm2::dispatch_event(activation.context, event, sound);
+
+        let bytearray_obj = Avm2Object::from(bytearray);
+        let Some(storage) = bytearray_obj.as_bytearray() else {
+            return Vec::new();
+        };
+        let little_endian = storage.endian() == Endian::Little;
+        // Flash plays at most 8192 frames per event; anything beyond is ignored.
+        let bytes = storage.bytes();
+        let bytes = &bytes[..bytes.len().min(8192 * 8)];
+        sample_data_to_frames(bytes, little_endian)
     }
 
     pub fn attach_avm2_sound_channel(
@@ -605,6 +825,7 @@ impl<'gc> AudioManager<'gc> {
                 avm1_object: None,
                 avm2_object: None,
                 stream_start_frame: Some(clip_frame),
+                dynamic: None,
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
             self.sounds.push(instance);
@@ -631,6 +852,7 @@ impl<'gc> AudioManager<'gc> {
                 avm1_object: None,
                 avm2_object: None,
                 stream_start_frame: None,
+                dynamic: None,
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
             self.sounds.push(instance);
@@ -872,6 +1094,21 @@ pub struct SoundInstance<'gc> {
     avm2_object: Option<SoundChannelObject<'gc>>,
 
     stream_start_frame: Option<u16>,
+
+    /// For sounds generated through `SampleDataEvent`: the AVM2 `Sound` that
+    /// produces the data, plus the queue that feeds the mixer.
+    dynamic: Option<DynamicSource<'gc>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct DynamicSource<'gc> {
+    sound: Avm2Object<'gc>,
+    #[collect(require_static)]
+    buffer: DynamicSoundBuffer,
+    /// Sample position passed as `SampleDataEvent.position`.
+    #[collect(require_static)]
+    position: f64,
 }
 
 /// A sound transform for a playing sound, for use by audio backends.

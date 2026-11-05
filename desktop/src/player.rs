@@ -339,7 +339,11 @@ impl ActivePlayer {
             .with_avm2_optimizer_enabled(opt.avm2_optimizer_enabled);
         let player = builder.build();
 
-        window.set_title(&format!("Ruffle - {readable_name}"));
+        if crate::smbc::is_bundle() {
+            window.set_title(crate::smbc::TITLE);
+        } else {
+            window.set_title(&format!("Ruffle - {readable_name}"));
+        }
 
         SWF_INFO.with(|i| *i.borrow_mut() = Some(readable_name));
 

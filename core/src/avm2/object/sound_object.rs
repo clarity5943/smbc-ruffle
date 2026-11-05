@@ -141,6 +141,15 @@ impl<'gc> SoundObject<'gc> {
 
     /// Returns `true` if a `SoundChannel` should be returned back to the AVM2 caller.
     pub fn play(self, queued: QueuedPlay<'gc>, activation: &mut Activation<'_, 'gc>) -> bool {
+        // A Sound that never loaded anything but has a `sampleData` listener
+        // generates its audio at runtime (dynamic sound).
+        if self.loading_state() == SoundLoadingState::New
+            && self.sound_handle().is_none()
+            && has_sample_data_listener(self.into(), activation)
+        {
+            return play_dynamic(self, queued, activation.context);
+        }
+
         let mut sound_data = unlock!(
             Gc::write(activation.gc(), self.0),
             SoundObjectData,
@@ -264,6 +273,41 @@ impl<'gc> SoundObject<'gc> {
             let id3_evt = EventObject::bare_default_event(activation.context, "id3");
             Avm2::dispatch_event(activation.context, id3_evt, self.into());
         }
+    }
+}
+
+fn has_sample_data_listener<'gc>(obj: Object<'gc>, activation: &mut Activation<'_, 'gc>) -> bool {
+    use crate::avm2::globals::slots::flash_events_event_dispatcher as dispatcher_slots;
+    use crate::avm2::value::Value;
+    match obj.get_slot(dispatcher_slots::DISPATCH_LIST) {
+        Value::Object(list) => {
+            let name = AvmString::new_ascii_static(activation.gc(), b"sampleData");
+            list.as_dispatch_mut(activation.gc())
+                .map(|d| d.has_event_listener(name))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Starts a `SampleDataEvent`-driven sound. Returns `false` when no more
+/// sounds can be played (Flash returns `null` from `Sound.play` then).
+fn play_dynamic<'gc>(
+    sound: SoundObject<'gc>,
+    queued: QueuedPlay<'gc>,
+    context: &mut UpdateContext<'gc>,
+) -> bool {
+    let instance = context.audio_manager.start_dynamic_sound(
+        context.audio,
+        sound.into(),
+        queued.sound_transform,
+    );
+    if let Some(instance) = instance {
+        queued.sound_channel.set_sound_instance(context, instance);
+        context.attach_avm2_sound_channel(instance, queued.sound_channel);
+        true
+    } else {
+        false
     }
 }
 

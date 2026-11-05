@@ -1,7 +1,9 @@
 use super::decoders::{
     self, AdpcmDecoder, Decoder, G711ALawDecoder, G711MuLawDecoder, PcmDecoder, SeekableDecoder,
 };
-use super::{SoundHandle, SoundInstanceHandle, SoundStreamInfo, SoundTransform};
+use super::{
+    DynamicSoundBuffer, SoundHandle, SoundInstanceHandle, SoundStreamInfo, SoundTransform,
+};
 use crate::backend::audio::{DecodeError, RegisterError};
 use crate::tag_utils::SwfSlice;
 use ruffle_common::buffer::Substream;
@@ -131,6 +133,65 @@ impl<D: Decoder> dasp::signal::Signal for DecoderStream<D> {
         } else {
             self.is_exhausted = true;
             Default::default()
+        }
+    }
+
+    #[inline]
+    fn is_exhausted(&self) -> bool {
+        self.is_exhausted
+    }
+}
+
+/// A stream fed by `SampleDataEvent` handlers through a `DynamicSoundBuffer`.
+/// Plays silence while waiting for data (buffer underrun) and only ends once
+/// the producer has finished and every queued frame was played.
+struct DynamicStream {
+    buffer: DynamicSoundBuffer,
+    local: std::collections::VecDeque<[i16; 2]>,
+    position: u32,
+    is_exhausted: bool,
+}
+
+impl DynamicStream {
+    fn new(buffer: DynamicSoundBuffer) -> Self {
+        Self {
+            buffer,
+            local: std::collections::VecDeque::with_capacity(1024),
+            position: 0,
+            is_exhausted: false,
+        }
+    }
+}
+
+impl Stream for DynamicStream {
+    #[inline]
+    fn source_position(&self) -> u32 {
+        self.position
+    }
+
+    #[inline]
+    fn source_sample_rate(&self) -> u16 {
+        44100
+    }
+}
+
+impl dasp::signal::Signal for DynamicStream {
+    type Frame = [i16; 2];
+
+    #[inline]
+    fn next(&mut self) -> [i16; 2] {
+        if self.local.is_empty() && !self.is_exhausted {
+            let (_, exhausted) = self.buffer.drain_into(&mut self.local, 1024);
+            if self.local.is_empty() && exhausted {
+                self.is_exhausted = true;
+            }
+        }
+        match self.local.pop_front() {
+            Some(frame) => {
+                self.position += 1;
+                frame
+            }
+            None => Default::default(),
         }
     }
 
@@ -627,6 +688,25 @@ impl AudioMixer {
         Ok(handle)
     }
 
+    /// Starts a sound generated at runtime through `SampleDataEvent`.
+    pub fn start_dynamic_sound(
+        &mut self,
+        buffer: DynamicSoundBuffer,
+    ) -> Result<SoundInstanceHandle, DecodeError> {
+        let stream = DynamicStream::new(buffer);
+        let stream: Box<dyn Stream> = if self.output_sample_rate == 44100 {
+            Box::new(stream)
+        } else {
+            Box::new(self.make_resampler(stream))
+        };
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let handle = sound_instances.insert(SoundInstance::new_stream(stream));
+        Ok(handle)
+    }
+
     /// Stops a playing sound instance.
     pub fn stop_sound(&mut self, sound: SoundInstanceHandle) {
         let mut sound_instances = self
@@ -1104,6 +1184,14 @@ macro_rules! impl_audio_mixer_backend {
             stream_info: &SoundStreamInfo,
         ) -> Result<SoundInstanceHandle, DecodeError> {
             self.$mixer.start_substream(stream_data, stream_info)
+        }
+
+        #[inline]
+        fn start_dynamic_sound(
+            &mut self,
+            buffer: ruffle_core::backend::audio::DynamicSoundBuffer,
+        ) -> Result<SoundInstanceHandle, DecodeError> {
+            self.$mixer.start_dynamic_sound(buffer)
         }
 
         #[inline]

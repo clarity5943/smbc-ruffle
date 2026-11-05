@@ -15,6 +15,7 @@ mod gui;
 mod log;
 mod player;
 mod preferences;
+mod smbc;
 #[cfg(feature = "tracy")]
 mod tracy;
 mod util;
@@ -87,7 +88,7 @@ fn panic_hook(info: &PanicHookInfo) {
 
     if rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
-        .set_title("Ruffle")
+        .set_title(if smbc::is_bundle() { smbc::TITLE } else { "Ruffle" })
         .set_description(format!(
             "Ruffle has encountered a fatal error, this is a bug.\n\n\
             {message}\n\n\
@@ -151,7 +152,18 @@ fn main() -> Result<(), Error> {
     #[cfg(windows)]
     let _console = windows::Console::attach();
 
-    let opt = Opt::parse();
+    let opt = match Opt::try_parse_from(smbc::build_args()) {
+        Ok(opt) => opt,
+        Err(err) if smbc::is_bundle() => {
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title(smbc::TITLE)
+                .set_description(format!("Invalid launch options (check options.txt):\n\n{err}"))
+                .show();
+            std::process::exit(2);
+        }
+        Err(err) => err.exit(),
+    };
 
     #[cfg(feature = "shell-completions")]
     if let Some(shell) = opt.completions {

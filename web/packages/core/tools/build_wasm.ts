@@ -50,10 +50,9 @@ function cargoBuild({
     extensions?: boolean;
 }) {
     let args = ["build", "--locked", "--target", "wasm32-unknown-unknown"];
-    if (!extensions) {
-        args.push("-Z");
-        args.push("build-std=std,panic_abort");
-    }
+    // Always rebuild std (the prebuilt wasm32 std isn't available here).
+    args.push("-Z");
+    args.push("build-std=std,panic_abort");
 
     if (profile) {
         args.push("--profile", profile);
@@ -80,7 +79,7 @@ function cargoBuild({
     const env: NodeJS.ProcessEnv = {
         ...process.env,
         RUSTFLAGS: totalRustFlags,
-        RUSTC_BOOTSTRAP: extensions ? "0" : "1",
+        RUSTC_BOOTSTRAP: "1",
     };
 
     if (!extensions) {
