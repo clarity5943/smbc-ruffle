@@ -4781,10 +4781,12 @@ dependencies = [
  "serde_json",
  "slotmap",
  "smallvec",
+ "smbc_gme",
  "swf 0.4.0",
  "symphonia",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
  "tracy-client",
  "ttf-parser",
  "unicode-segmentation",
@@ -5595,6 +5597,13 @@ name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+
+[[package]]
+name = "smbc_gme"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "smithay-client-toolkit"

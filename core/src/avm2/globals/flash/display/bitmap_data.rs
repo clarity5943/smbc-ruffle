@@ -973,6 +973,8 @@ pub fn draw<'gc>(
             quality,
         ) {
             Ok(()) => {}
+            // Headless profiling harness: pretend the draw happened.
+            Err(BitmapDataDrawError::Unimplemented) if cfg!(feature = "smbc_profile") => {}
             Err(BitmapDataDrawError::Unimplemented) => {
                 return Err("Render backend does not support BitmapData.draw".into());
             }
@@ -1049,6 +1051,8 @@ pub fn draw_with_quality<'gc>(
             quality,
         ) {
             Ok(()) => {}
+            // Headless profiling harness: pretend the draw happened.
+            Err(BitmapDataDrawError::Unimplemented) if cfg!(feature = "smbc_profile") => {}
             Err(BitmapDataDrawError::Unimplemented) => {
                 return Err("Render backend does not support BitmapData.draw".into());
             }

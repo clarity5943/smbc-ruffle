@@ -1,0 +1,10 @@
+[package]
+name = "smbc_gme"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-2.1-or-later"
+description = "Native Game Music Emu (libgme) used to accelerate SMBC's FlasCC-compiled libgme"
+publish = false
+
+[build-dependencies]
+cc = "1.2"

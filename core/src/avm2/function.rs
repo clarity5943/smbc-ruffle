@@ -242,6 +242,11 @@ pub fn exec<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mc = activation.gc();
 
+    #[cfg(feature = "smbc_gme")]
+    if let Some(f) = super::smbc_gme::lookup(method) {
+        return super::smbc_gme::call(f, user_arguments, activation);
+    }
+
     let caller_dxns = activation.default_xml_namespace();
 
     let ret = match method.method_kind() {
@@ -357,7 +362,21 @@ pub fn exec<'gc>(
 
             activation.context.avm2.push_call(mc, method);
 
+            #[cfg(feature = "smbc_profile")]
+            let __prof_key = {
+                let key = Gc::as_ptr(method.0) as *const () as usize;
+                profile::enter(key, || {
+                    let mut name = WString::new();
+                    display_function(&mut name, method);
+                    name.to_utf8_lossy().into_owned()
+                });
+                key
+            };
+
             let result = activation.run_actions(method);
+
+            #[cfg(feature = "smbc_profile")]
+            profile::exit(__prof_key);
 
             activation.cleanup();
 
@@ -451,4 +470,59 @@ pub fn display_function<'gc>(output: &mut WString, method: Method<'gc>) {
     }
 
     output.push_utf8("()");
+}
+
+#[cfg(feature = "smbc_profile")]
+pub mod profile {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    #[derive(Default)]
+    struct Entry { name: String, count: u64, incl: u128, selft: u128 }
+    #[derive(Default)]
+    struct Prof { stack: Vec<(usize, Instant, u128)>, map: HashMap<usize, Entry> }
+    thread_local!(static P: RefCell<Prof> = RefCell::new(Prof::default()));
+
+    pub fn enter(key: usize, name: impl FnOnce() -> String) {
+        P.with(|p| {
+            let mut p = p.borrow_mut();
+            if !p.map.contains_key(&key) {
+                let n = name();
+                p.map.insert(key, Entry { name: n, ..Default::default() });
+            }
+            p.stack.push((key, Instant::now(), 0));
+        });
+    }
+    pub fn exit(key: usize) {
+        P.with(|p| {
+            let mut p = p.borrow_mut();
+            if let Some((k, t, child)) = p.stack.pop() {
+                debug_assert_eq!(k, key);
+                let el = t.elapsed().as_nanos();
+                if let Some(parent) = p.stack.last_mut() { parent.2 += el; }
+                let recursive = p.stack.iter().any(|(pk, _, _)| *pk == k);
+                let e = p.map.get_mut(&k).unwrap();
+                e.count += 1;
+                if !recursive { e.incl += el; }
+                e.selft += el.saturating_sub(child);
+            }
+        });
+    }
+    pub fn dump(top: usize) {
+        P.with(|p| {
+            let p = p.borrow();
+            let mut v: Vec<&Entry> = p.map.values().collect();
+            v.sort_by(|a, b| b.selft.cmp(&a.selft));
+            println!("--- top by self time ---");
+            for e in v.iter().take(top) {
+                println!("{:9.1} ms self {:9.1} ms incl {:10} calls  {}", e.selft as f64 / 1e6, e.incl as f64 / 1e6, e.count, e.name);
+            }
+            v.sort_by(|a, b| b.incl.cmp(&a.incl));
+            println!("--- top by inclusive time ---");
+            for e in v.iter().take(top) {
+                println!("{:9.1} ms incl {:9.1} ms self {:10} calls  {}", e.incl as f64 / 1e6, e.selft as f64 / 1e6, e.count, e.name);
+            }
+        });
+    }
 }

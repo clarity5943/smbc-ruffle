@@ -95,11 +95,11 @@ impl<'gc> ParamConfig<'gc> {
 /// Represents a reference to an AVM2 method and body.
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct Method<'gc>(Gc<'gc, MethodData<'gc>>);
+pub struct Method<'gc>(pub(crate) Gc<'gc, MethodData<'gc>>);
 
 #[derive(Collect)]
 #[collect(no_drop)]
-struct MethodData<'gc> {
+pub(crate) struct MethodData<'gc> {
     /// The translation unit this function was defined in.
     txunit: TranslationUnit<'gc>,
 
@@ -127,6 +127,12 @@ struct MethodData<'gc> {
 
     /// The class that this method is bound to.
     association: OnceLock<MethodAssociation<'gc>>,
+
+    /// SMBC: cached result of the native libgme override lookup
+    /// (0 = not looked up yet, 1 = none, otherwise override id + 2).
+    #[cfg(feature = "smbc_gme")]
+    #[collect(require_static)]
+    pub(crate) gme_override: std::cell::Cell<u8>,
 
     /// Whether or not this method was declared as a free-standing function.
     ///
@@ -231,6 +237,8 @@ impl<'gc> Method<'gc> {
                 return_type,
                 resolved_info: OnceLock::new(),
                 association: OnceLock::new(),
+                #[cfg(feature = "smbc_gme")]
+                gme_override: std::cell::Cell::new(0),
                 is_function,
                 is_unchecked: is_function && all_params_unchecked,
             },

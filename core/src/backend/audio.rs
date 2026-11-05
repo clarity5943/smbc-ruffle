@@ -587,8 +587,10 @@ impl<'gc> AudioManager<'gc> {
         }
     }
 
-    /// Frames we try to keep queued for each dynamic sound (~140 ms at 44.1 kHz).
-    pub const DYNAMIC_SOUND_TARGET_FRAMES: usize = 6144;
+    /// Frames we try to keep queued for each dynamic sound (~280 ms at 44.1 kHz).
+    /// This only adds look-ahead: newly started sounds play as soon as their
+    /// first block is produced.
+    pub const DYNAMIC_SOUND_TARGET_FRAMES: usize = 12288;
 
     /// Flash ends a dynamic sound when a `sampleData` handler supplies fewer
     /// than this many sample frames.

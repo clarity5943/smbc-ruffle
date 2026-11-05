@@ -57,6 +57,10 @@ mod events;
 mod filters;
 mod flv;
 mod function;
+#[cfg(feature = "smbc_gme")]
+mod smbc_gme;
+#[cfg(feature = "smbc_profile")]
+pub use function::profile::dump as profile_dump;
 pub mod globals;
 mod index;
 mod metadata;

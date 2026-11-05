@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "core",
+    "smbc_gme",
     "core/macros",
     "core/build_playerglobal",
     "desktop",

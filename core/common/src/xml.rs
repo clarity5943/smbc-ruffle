@@ -1,36 +1,59 @@
 use quick_xml::escape::EscapeError as XmlEscapeError;
-use regress::Regex;
 use std::str::Utf8Error;
-use std::sync::LazyLock;
 
-// Matches XML entities like &amp; or &#39; or &#x1F600;
-// We exclude both ';' and '&' from the middle to avoid matching across multiple
-// ampersands - e.g. in "& &thing;" we want to match only "&thing;", not "& &thing;"
-static AVM1_ENTITY_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"&[^;&]*;").unwrap());
+/// How entity candidates are delimited (equivalent to the regexes
+/// `&[^;&]*;` for AVM1 and `&[^;]*;` for AVM2, but found with a linear scan:
+/// the regex engine backtracks quadratically on long text containing many
+/// `&` characters without a `;`, e.g. URL-encoded level data).
+#[derive(Clone, Copy, PartialEq)]
+enum EntityMode {
+    /// `&[^;&]*;` — an entity may not contain another '&'.
+    Avm1,
+    /// `&[^;]*;` — everything from an '&' up to the next ';'.
+    Avm2,
+}
 
-// AVM2's E4X parser does not decode entities preceded by a bare '&',
-// e.g. "&&amp;" is preserved as-is rather than decoded to "&&".
-// We achieve this by only excluding ';' from the middle, so "&&amp;" is
-// matched as a single entity, which fails to decode and is preserved.
-static AVM2_ENTITY_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"&[^;]*;").unwrap());
+/// Finds the next entity candidate at or after `from`, returning `(start, end)`.
+fn next_entity(bytes: &[u8], mut from: usize, mode: EntityMode) -> Option<(usize, usize)> {
+    loop {
+        let start = from + memchr_byte(b'&', &bytes[from..])?;
+        let mut i = start + 1;
+        loop {
+            match bytes.get(i) {
+                None => return None, // no ';' anywhere after: no more matches
+                Some(b';') => return Some((start, i + 1)),
+                Some(b'&') if mode == EntityMode::Avm1 => break, // retry from this '&'
+                _ => i += 1,
+            }
+        }
+        from = i;
+    }
+}
+
+fn memchr_byte(needle: u8, haystack: &[u8]) -> Option<usize> {
+    haystack.iter().position(|&b| b == needle)
+}
 
 /// AVM1 XML unescaping. Decodes entities individually, even when
 /// preceded by a bare '&' (e.g. "&&amp;" becomes "&&").
 pub fn avm1_unescape(input: &[u8]) -> Result<String, Utf8Error> {
-    custom_unescape(input, &AVM1_ENTITY_REGEX)
+    custom_unescape(input, EntityMode::Avm1)
 }
 
 /// AVM2 E4X XML unescaping. Does not decode entities preceded by a
 /// bare '&' (e.g. "&&amp;" is preserved as "&&amp;").
 pub fn avm2_unescape(input: &[u8]) -> Result<String, Utf8Error> {
-    custom_unescape(input, &AVM2_ENTITY_REGEX)
+    custom_unescape(input, EntityMode::Avm2)
 }
 
 /// Handles flash-specific XML unescaping behavior.
 /// We accept all XML entities, and also accept standalone '&' without
 /// a corresponding ';'
-fn custom_unescape(input: &[u8], entity_regex: &Regex) -> Result<String, Utf8Error> {
+fn custom_unescape(input: &[u8], mode: EntityMode) -> Result<String, Utf8Error> {
     let input = std::str::from_utf8(input)?;
+    if !input.as_bytes().contains(&b'&') {
+        return Ok(input.to_owned());
+    }
 
     let mut result = String::new();
     let mut last_end = 0;
@@ -38,9 +61,8 @@ fn custom_unescape(input: &[u8], entity_regex: &Regex) -> Result<String, Utf8Err
     // Find all entities, and try to unescape them.
     // Our regular expression will skip over '&' without a matching ';',
     // which will preserve them as-is in the output
-    for cap in entity_regex.find_iter(input) {
-        let start = cap.start();
-        let end = cap.end();
+    let bytes = input.as_bytes();
+    while let Some((start, end)) = next_entity(bytes, last_end, mode) {
 
         result.push_str(&input[last_end..start]);
 

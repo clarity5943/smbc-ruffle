@@ -74,10 +74,16 @@ itertools = "0.14.0"
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
 workspace = true
 
+[dependencies.smbc_gme]
+path = "../smbc_gme"
+optional = true
+
 [target.'cfg(target_family = "wasm")'.dependencies.wasm-bindgen-futures]
 version = "0.4.70"
 
 [features]
+smbc_profile = []
+smbc_gme = ["dep:smbc_gme"]
 default = []
 lzma = ["lzma-rs", "swf/lzma"]
 avm_debug = []
@@ -96,3 +102,6 @@ serde = ["serde/derive"]
 
 [build-dependencies]
 build_playerglobal = { path = "build_playerglobal" }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

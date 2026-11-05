@@ -2765,7 +2765,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         self.outer.domain()
     }
 
-    fn domain_memory(&self) -> ByteArrayObject<'gc> {
+    pub(crate) fn domain_memory(&self) -> ByteArrayObject<'gc> {
         self.outer.domain().domain_memory()
     }
 

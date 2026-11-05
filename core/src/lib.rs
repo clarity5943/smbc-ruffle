@@ -15,6 +15,8 @@ extern crate num_derive;
 #[macro_use]
 mod avm1;
 mod avm2;
+#[cfg(feature = "smbc_profile")]
+pub use avm2::profile_dump;
 mod avm_rng;
 mod binary_data;
 pub mod bitmap;

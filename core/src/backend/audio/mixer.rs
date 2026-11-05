@@ -693,11 +693,26 @@ impl AudioMixer {
         &mut self,
         buffer: DynamicSoundBuffer,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        let stream = DynamicStream::new(buffer);
+        let mut stream = DynamicStream::new(buffer);
         let stream: Box<dyn Stream> = if self.output_sample_rate == 44100 {
             Box::new(stream)
         } else {
-            Box::new(self.make_resampler(stream))
+            let mut interpolator = PolyphaseSinc::new(44100, self.output_sample_rate);
+            // Prime the right half of the kernel so output starts aligned.
+            for _ in 0..PolyphaseSinc::TAPS_HALF {
+                dasp::interpolate::Interpolator::next_source_frame(
+                    &mut interpolator,
+                    dasp::signal::Signal::next(&mut stream),
+                );
+            }
+            Box::new(ConverterStream(
+                dasp::signal::interpolate::Converter::from_hz_to_hz(
+                    stream,
+                    interpolator,
+                    44100.0,
+                    self.output_sample_rate.into(),
+                ),
+            ))
         };
         let mut sound_instances = self
             .sound_instances
@@ -956,6 +971,87 @@ impl Stream for EventSoundStream {
     #[inline]
     fn source_sample_rate(&self) -> u16 {
         self.decoder.sample_rate()
+    }
+}
+
+/// Windowed-sinc interpolator with a precomputed polyphase table.
+///
+/// Used for dynamically generated sound (SampleDataEvent), where the source is
+/// usually full-bandwidth 44.1 kHz chiptune audio: linear interpolation to a
+/// 48 kHz device produces audible aliasing on square waves.
+struct PolyphaseSinc {
+    /// Ring of 2 * TAPS_HALF source frames; `frames[TAPS_HALF - 1]` is the "left" frame.
+    frames: [[f32; 2]; PolyphaseSinc::TAPS],
+    table: std::sync::Arc<Vec<f32>>,
+}
+
+impl PolyphaseSinc {
+    const TAPS_HALF: usize = 8;
+    const TAPS: usize = Self::TAPS_HALF * 2;
+    const PHASES: usize = 512;
+
+    fn new(source_rate: u32, output_rate: u32) -> Self {
+        // Cutoff a bit below the lower of the two Nyquist frequencies,
+        // expressed in cycles per source sample.
+        let fc = 0.5 * (output_rate as f64 / source_rate as f64).min(1.0) * 0.94;
+        let mut table = vec![0f32; Self::PHASES * Self::TAPS];
+        for p in 0..Self::PHASES {
+            let x = p as f64 / Self::PHASES as f64;
+            let mut sum = 0.0;
+            for j in 0..Self::TAPS {
+                // Distance from the evaluation point to source frame j.
+                let t = (j as f64 - (Self::TAPS_HALF as f64 - 1.0)) - x;
+                let sinc = if t.abs() < 1e-9 {
+                    2.0 * fc
+                } else {
+                    (2.0 * std::f64::consts::PI * fc * t).sin() / (std::f64::consts::PI * t)
+                };
+                // Blackman window over the span of the kernel.
+                let n = (t + Self::TAPS_HALF as f64) / (Self::TAPS as f64);
+                let w = if (0.0..=1.0).contains(&n) {
+                    0.42 - 0.5 * (2.0 * std::f64::consts::PI * n).cos()
+                        + 0.08 * (4.0 * std::f64::consts::PI * n).cos()
+                } else {
+                    0.0
+                };
+                let v = sinc * w;
+                table[p * Self::TAPS + j] = v as f32;
+                sum += v;
+            }
+            // Normalise each phase to unity gain at DC.
+            if sum.abs() > 1e-9 {
+                for j in 0..Self::TAPS {
+                    table[p * Self::TAPS + j] /= sum as f32;
+                }
+            }
+        }
+        Self {
+            frames: [[0.0; 2]; Self::TAPS],
+            table: std::sync::Arc::new(table),
+        }
+    }
+}
+
+impl dasp::interpolate::Interpolator for PolyphaseSinc {
+    type Frame = [i16; 2];
+
+    fn interpolate(&self, x: f64) -> [i16; 2] {
+        let p = ((x * Self::PHASES as f64) as usize).min(Self::PHASES - 1);
+        let h = &self.table[p * Self::TAPS..(p + 1) * Self::TAPS];
+        let (mut l, mut r) = (0f32, 0f32);
+        for (f, w) in self.frames.iter().zip(h) {
+            l += f[0] * w;
+            r += f[1] * w;
+        }
+        [
+            l.round().clamp(-32768.0, 32767.0) as i16,
+            r.round().clamp(-32768.0, 32767.0) as i16,
+        ]
+    }
+
+    fn next_source_frame(&mut self, f: [i16; 2]) {
+        self.frames.copy_within(1.., 0);
+        self.frames[Self::TAPS - 1] = [f[0] as f32, f[1] as f32];
     }
 }
 
@@ -1252,4 +1348,50 @@ macro_rules! impl_audio_mixer_backend {
             self.$mixer.get_sample_history()
         }
     };
+}
+
+#[cfg(test)]
+mod smbc_dynamic_tests {
+    use super::*;
+
+    /// A 1 kHz tone pushed at 44.1 kHz must come out of a 48 kHz mixer
+    /// as a clean 1 kHz tone (no aliasing / distortion from resampling).
+    #[test]
+    fn dynamic_sound_resamples_cleanly() {
+        let mut mixer = AudioMixer::new(2, 48000);
+        let buffer = DynamicSoundBuffer::new();
+        let frames: Vec<[i16; 2]> = (0..44100)
+            .map(|i| {
+                let v = ((i as f64) * 2.0 * std::f64::consts::PI * 1000.0 / 44100.0).sin() * 16000.0;
+                [v as i16, v as i16]
+            })
+            .collect();
+        buffer.push_frames(frames);
+        buffer.finish();
+        mixer.start_dynamic_sound(buffer).unwrap();
+        let mut out = vec![0i16; 48000 * 2];
+        mixer.mix::<i16>(&mut out);
+        // Least-squares fit of a 1 kHz sinusoid; everything left over is error.
+        let left: Vec<f64> = out.iter().step_by(2).map(|&s| s as f64).collect();
+        let w = 2.0 * std::f64::consts::PI * 1000.0 / 48000.0;
+        let (mut ss, mut cc, mut sc, mut ys, mut yc) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let range = 1000..41000;
+        for n in range.clone() {
+            let (s, c) = ((n as f64) * w).sin_cos();
+            ss += s * s; cc += c * c; sc += s * c; ys += left[n] * s; yc += left[n] * c;
+        }
+        let det = ss * cc - sc * sc;
+        let a = (ys * cc - yc * sc) / det;
+        let b = (yc * ss - ys * sc) / det;
+        let (mut best_err, mut best_amp) = (0.0, 0.0);
+        for n in range {
+            let (s, c) = ((n as f64) * w).sin_cos();
+            let fit = a * s + b * c;
+            best_err += (left[n] - fit).powi(2);
+            best_amp += fit.powi(2);
+        }
+        let snr_db = 10.0 * (best_amp / best_err).log10();
+        println!("SNR {snr_db:.1} dB");
+        assert!(snr_db > 60.0, "resampled tone SNR too low: {snr_db:.1} dB");
+    }
 }
