@@ -64,7 +64,28 @@ fn main() {
         let t = Instant::now();
         {
             let mut p = player.lock().unwrap();
-            if f >= 600 && f % 300 == 0 {
+            if let Ok(script) = std::env::var("SMBC_KEYS") {
+                use ruffle_core::events::{KeyDescriptor, KeyLocation, LogicalKey, NamedKey, PhysicalKey, PlayerEvent};
+                for item in script.split(',') {
+                    let mut parts = item.split(':');
+                    let fr: u64 = parts.next().unwrap().parse().unwrap();
+                    let key = parts.next().unwrap();
+                    let dur: u64 = parts.next().map(|d| d.parse().unwrap()).unwrap_or(6);
+                    let (pk, lk) = match key {
+                        "enter" => (PhysicalKey::Enter, LogicalKey::Named(NamedKey::Enter)),
+                        "z" => (PhysicalKey::KeyZ, LogicalKey::Character('z')),
+                        "x" => (PhysicalKey::KeyX, LogicalKey::Character('x')),
+                        "right" => (PhysicalKey::ArrowRight, LogicalKey::Named(NamedKey::ArrowRight)),
+                        "left" => (PhysicalKey::ArrowLeft, LogicalKey::Named(NamedKey::ArrowLeft)),
+                        "up" => (PhysicalKey::ArrowUp, LogicalKey::Named(NamedKey::ArrowUp)),
+                        "down" => (PhysicalKey::ArrowDown, LogicalKey::Named(NamedKey::ArrowDown)),
+                        _ => panic!("key {key}"),
+                    };
+                    let k = KeyDescriptor { physical_key: pk, logical_key: lk, key_location: KeyLocation::Standard };
+                    if f == fr { p.handle_event(PlayerEvent::KeyDown { key: k }); println!("[{:7.2}s] key {key}", start.elapsed().as_secs_f64()); }
+                    if f == fr + dur { p.handle_event(PlayerEvent::KeyUp { key: k }); }
+                }
+            } else if f >= 600 && f % 300 == 0 {
                 use ruffle_core::events::{MouseButton, PlayerEvent};
                 p.handle_event(PlayerEvent::MouseMove { x: 256.0, y: 240.0 });
                 p.handle_event(PlayerEvent::MouseDown { x: 256.0, y: 240.0, button: MouseButton::Left, index: None });

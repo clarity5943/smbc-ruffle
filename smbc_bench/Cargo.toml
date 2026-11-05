@@ -1,0 +1,11 @@
+[package]
+name = "smbc_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ruffle_core = { path = "../core", features = ["audio", "mp3", "aac", "nellymoser", "default_compatibility_rules", "smbc_gme"] }
+ruffle_render_wgpu = { path = "../render/wgpu" }
+image = { workspace = true, features = ["png"] }
+tracing-subscriber = { workspace = true }

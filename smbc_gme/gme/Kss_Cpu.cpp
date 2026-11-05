@@ -388,7 +388,10 @@ possibly_out_of_time:
 	}
 	
 	case 0xFF: // RST
-		if ( pc >= idle_addr )
+		// pc is 16-bit, so fetching the opcode at idle_addr ($FFFF) wraps it to 0.
+		// (The original `pc >= idle_addr` test could never be true, and KSS tunes
+		// ran off into memory instead of returning to the player: silence.)
+		if ( pc == uint16_t (idle_addr + 1) )
 			goto hit_idle_addr;
 	CASE7( C7, CF, D7, DF, E7, EF, F7 ):
 		data = pc;

@@ -2,6 +2,7 @@
 members = [
     "core",
     "smbc_gme",
+    "smbc_bench",
     "core/macros",
     "core/build_playerglobal",
     "desktop",
