@@ -46,7 +46,7 @@ pub fn primary_display_size() -> Option<(u32, u32)> {
 /// Returns the path of the widened movie, creating it if needed.
 pub fn widened_movie(swf: &Path, cache_dir: &Path, width: u32) -> Result<PathBuf, String> {
     let meta = std::fs::metadata(swf).map_err(|e| e.to_string())?;
-    let out = cache_dir.join(format!("smbc3_w{width}_{}.swf", meta.len()));
+    let out = cache_dir.join(format!("smbc3_w{width}_{}_v2.swf", meta.len()));
     let _ = std::fs::create_dir_all(cache_dir);
     // The movie loads its data file relative to itself.
     if let Some(dir) = swf.parent() {
@@ -360,7 +360,15 @@ fn patch_abc(abc: &[u8], w: u32) -> Result<Vec<u8>, String> {
     let pool = read_pool(abc)?;
     let traits = slot_traits(abc, &pool)?;
     let half = w / 2;
+    let more = |n: u32| more_shots(n, w);
     let want: &[(&str, &str, u32)] = &[
+        // Player projectile limits (instance constants), scaled with the screen.
+        ("MarioBase", "MAX_FIREBALLS_ON_SCREEN", more(2)),
+        ("Samus", "MAX_SHOTS_ON_SCREEN", more(3)),
+        ("Bill", "MAX_NORMAL_BULLETS", more(4)),
+        ("Bill", "MAX_MACHINE_GUN_BULLETS", more(6)),
+        // The spread gun fires 5 bullets at a time.
+        ("Bill", "MAX_SPREAD_BULLETS", more(2) * 5),
         ("Level", "SCREEN_WIDTH", w),
         ("Level", "locStgRht", w),
         ("Level", "GLOB_STG_RHT", w),
@@ -480,7 +488,74 @@ fn patch_abc(abc: &[u8], w: u32) -> Result<Vec<u8>, String> {
             }
         }
     }
+    patch_projectile_limits(&mut out, &idx_of, w);
     Ok(out)
+}
+
+/// How many player projectiles may be on screen at once on a `w`-wide screen
+/// when the game allows `n` on its 512 px screen: the same number per screen
+/// width, so shots that fly to the edge leave as little downtime as before.
+pub fn more_shots(n: u32, w: u32) -> u32 {
+    let scaled = (n as f64 * w as f64 / ORIGINAL_WIDTH as f64).round() as u32;
+    scaled.clamp(n, 127)
+}
+
+/// Static projectile limits are set in class initialisers
+/// (`findproperty X; pushbyte n; initproperty X`), Simon's sub-weapon limit
+/// (1, or 2/3 with the double/triple shot upgrade) in `Simon.canThrow`.
+fn patch_projectile_limits(out: &mut [u8], idx_of: &dyn Fn(&str, bool) -> Vec<u32>, w: u32) {
+    let statics: &[(&str, u8)] = &[
+        ("MAX_BULLETS_ON_SCREEN", 3),                     // Sophia
+        ("NUM_MEGA_BUSTER_SHOTS_ALLOWED", 3),             // Mega Man
+        ("NUM_BASS_BUSTER_NO_MUSHROOM_SHOTS_ALLOWED", 3), // Bass
+        ("NUM_BASS_BUSTER_SHOTS_ALLOWED", 4),             // Bass
+        ("NUM_METAL_BLADES_ALLOWED", 3),                  // Mega Man / Bass
+    ];
+    for &(name, n) in statics {
+        for i in idx_of(name, false) {
+            let e = enc_u30(i);
+            let mut pat = vec![0x5e];
+            pat.extend(&e);
+            pat.extend([0x24, n, 0x68]);
+            pat.extend(&e);
+            if let Some(k) = find(out, &pat, 0) {
+                out[k + 1 + e.len() + 1] = more_shots(n as u32, w) as u8;
+            }
+        }
+    }
+    // Bill: NUM_FLARE_SHOTS_ALLOWED = 3 * 2
+    for i in idx_of("NUM_FLARE_SHOTS_ALLOWED", false) {
+        let e = enc_u30(i);
+        let mut pat = vec![0x5e];
+        pat.extend(&e);
+        pat.extend([0x24, 3, 0x24, 2, 0xa2, 0x68]);
+        pat.extend(&e);
+        if let Some(k) = find(out, &pat, 0) {
+            out[k + 1 + e.len() + 1] = more_shots(3, w) as u8;
+        }
+    }
+    // Simon.canThrow: pushbyte 1; setlocal2; findpropstrict upgradeIsActive;
+    // getlex SIMON_TRIPLE; ... pushbyte 3; setlocal2; ... pushbyte 2; setlocal2
+    for ua in idx_of("upgradeIsActive", true) {
+        for tr in idx_of("SIMON_TRIPLE", false) {
+            let mut pat = vec![0x24, 1, 0xd6, 0x5d];
+            pat.extend(enc_u30(ua));
+            pat.push(0x60);
+            pat.extend(enc_u30(tr));
+            let Some(k) = find(out, &pat, 0) else { continue };
+            // Locate all three before changing any (a new value may equal an old one).
+            let end = (k + 64).min(out.len());
+            let triple = find(&out[..end], &[0x24, 3, 0xd6], k + 3);
+            let double = find(&out[..end], &[0x24, 2, 0xd6], k + 3);
+            out[k + 1] = more_shots(1, w) as u8;
+            if let Some(t) = triple {
+                out[t + 1] = more_shots(3, w) as u8;
+            }
+            if let Some(t) = double {
+                out[t + 1] = more_shots(2, w) as u8;
+            }
+        }
+    }
 }
 
 fn read_rect(b: &[u8]) -> (Vec<i64>, usize) {
