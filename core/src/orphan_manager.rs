@@ -90,6 +90,7 @@ impl<'gc> OrphanManager<'gc> {
                 false
             }
         });
+        crate::SMBC_ORPHANS.store(self.orphans.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

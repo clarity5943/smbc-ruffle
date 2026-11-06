@@ -38,6 +38,7 @@ impl LogBackend for Log {
     }
 }
 
+thread_local!(static RF: std::cell::RefCell<(f64, u32)> = std::cell::RefCell::new((0.0, 0)));
 thread_local!(static STATS: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new()));
 
 fn main() {
@@ -100,10 +101,20 @@ fn main() {
                 p.handle_event(PlayerEvent::MouseUp { x: 256.0, y: 240.0, button: MouseButton::Left });
                 println!("[{:7.2}s] click", start.elapsed().as_secs_f64());
             }
+            let rf = Instant::now();
             p.run_frame();
+            RF.with(|r| { let mut r = r.borrow_mut(); r.0 += rf.elapsed().as_secs_f64() * 1000.0; r.1 += 1; if r.1 == 1200 { println!("[run_frame] frames {}-{}: avg {:.2} ms orphans {}", f + 1 - 1200, f, r.0 / 1200.0, ruffle_core::SMBC_ORPHANS.load(std::sync::atomic::Ordering::Relaxed)); *r = (0.0, 0); } });
             p.update_timers(ruffle_core::FloatDuration::from_millis(dt));
             p.audio_mut().tick();
-            p.render();
+            if std::env::var_os("SMBC_NORENDER").is_none() { p.render(); }
+            if let Ok(at) = std::env::var("SMBC_GC_AT") {
+                if at.split(',').any(|a| a.parse::<u64>().ok() == Some(f)) {
+                    let t = Instant::now();
+                    p.smbc_full_gc();
+                    println!("[orphans]\n{}", p.smbc_orphan_histogram());
+                    println!("[gc] full cycle at frame {f}: {:.1} ms (orphans before cleanup {})", t.elapsed().as_secs_f64() * 1000.0, ruffle_core::SMBC_ORPHANS.load(std::sync::atomic::Ordering::Relaxed));
+                }
+            }
             if let Ok(at) = std::env::var("SMBC_DUMP_AT") {
                 if at.split(',').any(|a| a.parse::<u64>().ok() == Some(f)) {
                     let depth = std::env::var("SMBC_DUMP_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(3);
@@ -120,7 +131,7 @@ fn main() {
         }
         executor.run();
         let ms = t.elapsed().as_secs_f64() * 1000.0;
-        if ms < dt { std::thread::sleep(Duration::from_secs_f64((dt - ms) / 1000.0)); }
+        if ms < dt && std::env::var_os("SMBC_FAST").is_none() { std::thread::sleep(Duration::from_secs_f64((dt - ms) / 1000.0)); }
         total_ms += ms;
         if let Ok(from) = std::env::var("SMBC_STATS_FROM") {
             let from: u64 = from.parse().unwrap();

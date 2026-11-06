@@ -251,7 +251,7 @@ pub fn exec<'gc>(
             None
         }
         Some(super::smbc_gme::Override::Wide(w)) => {
-            match super::smbc_wide::call(w, receiver, activation) {
+            match super::smbc_wide::call(w, receiver, user_arguments, activation) {
                 super::smbc_wide::Hook::Replace(r) => return r,
                 super::smbc_wide::Hook::Pass => None,
                 super::smbc_wide::Hook::Post => Some(w),

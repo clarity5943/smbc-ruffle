@@ -3377,3 +3377,32 @@ impl Player {
         })
     }
 }
+
+impl Player {
+    /// SMBC debugging: run a complete garbage collection cycle.
+    pub fn smbc_orphan_histogram(&mut self) -> String {
+        use crate::display_object::TDisplayObject;
+        self.mutate_with_update_context(|ctx| {
+            let mut counts: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
+            crate::orphan_manager::OrphanManager::each_orphan_obj(ctx, |o, _| {
+                let class = o
+                    .object2()
+                    .map(|s| { use crate::avm2::TObject; s.instance_class().name().local_name().to_string() })
+                    .unwrap_or_else(|| "<no object>".into());
+                let kids = o.as_container().map(|c| { use crate::display_object::TDisplayObjectContainer; c.num_children() }).unwrap_or(0);
+                let playing = o.as_movie_clip().map(|m| m.playing()).unwrap_or(false);
+                let e = counts.entry(class).or_default();
+                e.0 += 1;
+                e.1 += kids;
+                e.2 += playing as usize;
+            });
+            let mut v: Vec<_> = counts.into_iter().collect();
+            v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+            v.iter().take(30).map(|(k, (n, kids, pl))| format!("  {n:6} {k} (children {kids}, playing {pl})\n")).collect()
+        })
+    }
+
+    pub fn smbc_full_gc(&mut self) {
+        self.gc_arena.borrow_mut().finish_cycle();
+    }
+}

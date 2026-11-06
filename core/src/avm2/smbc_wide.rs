@@ -38,6 +38,8 @@ pub enum WideFn {
     /// `InformativeBlackScreen.initiate()` (pre): centre the "WORLD 1-1" /
     /// game over / time up screens.
     BlackScreen,
+    /// `new Dictionary(weakKeys)` (pre): Ruffle ignored weak keys.
+    DictionaryCtor,
 }
 
 pub fn classify(name: &str) -> Option<WideFn> {
@@ -46,6 +48,7 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.graphics::TopScreenText/scroll()" => WideFn::TopTextScroll,
         "com.smbc.characters::Character/saveSkinPreviews()" => WideFn::SaveSkinPreviews,
         "com.smbc.screens::InformativeBlackScreen/initiate()" => WideFn::BlackScreen,
+        "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
         n if n.starts_with("com.smbc.level::Level/") && n.ends_with("calcLocStgPos()") => {
             WideFn::CalcLocStg
         }
@@ -109,7 +112,19 @@ fn is_level_class(n: &str) -> bool {
     n == "Level" || (n.ends_with("Level") && !n.starts_with("Level")) || n == "CharacterSelect"
 }
 
-pub fn call<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) -> Hook<'gc> {
+pub fn call<'gc>(
+    f: WideFn,
+    receiver: Value<'gc>,
+    args: super::function::FunctionArgs<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Hook<'gc> {
+    if f == WideFn::DictionaryCtor {
+        let weak = args.to_slice().first().is_some_and(|v| v.coerce_to_boolean());
+        if weak && let Some(d) = receiver.as_object().and_then(|o| o.as_dictionary_object()) {
+            d.set_weak_keys(true);
+        }
+        return Hook::Pass;
+    }
     let stage_w = stage_width(activation);
     if stage_w <= ORIGINAL_WIDTH {
         return Hook::Pass;
@@ -170,6 +185,7 @@ pub fn call<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_
             Hook::Replace(Ok(Value::Undefined))
         }
         WideFn::CalcLocStg => Hook::Post,
+        WideFn::DictionaryCtor => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
