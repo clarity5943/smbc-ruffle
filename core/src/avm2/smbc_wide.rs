@@ -46,6 +46,11 @@ pub enum WideFn {
     /// instead of `MapSkinMenu`, also while random map skin is on (the game
     /// would only say it can't be changed).
     MapSkinMenuSwap,
+    /// `CustomMovieClip.trimBmp()` (pre): Flash reports a mirrored object
+    /// (negative determinant) with a negative scaleY, Ruffle with a positive one
+    /// (and rotation 180), so trimmed sprite parts placed with a horizontal flip
+    /// were shifted vertically (e.g. the right half of Samus's enemy explosion).
+    TrimBmp,
 }
 
 pub fn classify(name: &str) -> Option<WideFn> {
@@ -59,6 +64,9 @@ pub fn classify(name: &str) -> Option<WideFn> {
             && n.ends_with("pressedSelectCharacterButton()") =>
         {
             WideFn::MapSkinMenuSwap
+        }
+        n if n.starts_with("com.explodingRabbit.display::CustomMovieClip/") && n.ends_with("trimBmp()") => {
+            WideFn::TrimBmp
         }
         n if n.starts_with("com.smbc.messageBoxes::GraphicsOptions/") && n.ends_with("chooseItem()") => {
             WideFn::MapSkinMenuSwap
@@ -143,6 +151,12 @@ pub fn call<'gc>(
     if f == WideFn::MapSkinMenuSwap {
         return Hook::Post;
     }
+    if f == WideFn::TrimBmp {
+        if std::env::var_os("SMBC_NO_TRIMFIX").is_none() {
+            fix_trim_scale(args, activation);
+        }
+        return Hook::Pass;
+    }
     let stage_w = stage_width(activation);
     if stage_w <= ORIGINAL_WIDTH {
         return Hook::Pass;
@@ -203,7 +217,7 @@ pub fn call<'gc>(
             Hook::Replace(Ok(Value::Undefined))
         }
         WideFn::CalcLocStg => Hook::Post,
-        WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap => Hook::Pass,
+        WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap | WideFn::TrimBmp => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -223,6 +237,25 @@ pub fn call<'gc>(
             }
             Hook::Pass
         }
+    }
+}
+
+/// trimBmp(bmd, rect, [matrix, scaleX, scaleY, rotation])
+fn fix_trim_scale<'gc>(args: super::function::FunctionArgs<'_, 'gc>, activation: &mut Activation<'_, 'gc>) {
+    let Some(info) = args.to_slice().get(2).copied().filter(|v| v.as_object().is_some()) else {
+        return;
+    };
+    let Some(matrix) = get(info, "0", activation).filter(|v| v.as_object().is_some()) else {
+        return;
+    };
+    let mut m = [0.0f64; 4];
+    for (i, k) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        m[i] = get(matrix, k, activation).map(|v| num(v, activation)).unwrap_or(f64::NAN);
+    }
+    let det = m[0] * m[3] - m[1] * m[2];
+    let sy = get(info, "2", activation).map(|v| num(v, activation)).unwrap_or(f64::NAN);
+    if det < 0.0 && sy > 0.0 {
+        set(info, "2", -sy, activation);
     }
 }
 
