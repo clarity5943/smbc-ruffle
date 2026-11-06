@@ -49,15 +49,16 @@ fn main() {
     let nav = NullNavigatorBackend::with_base_path(path.parent().unwrap(), &executor).unwrap();
     let movie = movie_from_path(&path, None).unwrap();
     let start = Instant::now();
+    let (vw, vh): (u32, u32) = std::env::var("SMBC_VIEW").ok().and_then(|v| { let (a, b) = v.split_once('x')?; Some((a.parse().ok()?, b.parse().ok()?)) }).unwrap_or((512, 480));
     let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i16>::new()));
     let audio = BenchAudio { mixer: AudioMixer::new(2, 44100), buffer: vec![], out: out.clone() };
     let player = PlayerBuilder::new()
         .with_audio(audio)
-        .with_renderer(WgpuRenderBackend::<TextureTarget>::for_offscreen((512, 480), ruffle_render_wgpu::wgpu::Backends::GL, ruffle_render_wgpu::wgpu::PowerPreference::LowPower).expect("offscreen renderer"))
+        .with_renderer(WgpuRenderBackend::<TextureTarget>::for_offscreen((vw, vh), ruffle_render_wgpu::wgpu::Backends::GL, ruffle_render_wgpu::wgpu::PowerPreference::LowPower).expect("offscreen renderer"))
         .with_log(Log(start))
         .with_navigator(nav)
         .with_max_execution_duration(Duration::from_secs(3600))
-        .with_viewport_dimensions(512, 480, 1.0)
+        .with_viewport_dimensions(vw, vh, 1.0)
         .with_movie(movie)
         .with_autoplay(true)
         .build();

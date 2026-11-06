@@ -37,17 +37,26 @@ pub enum GmeFn {
     SetStereoDepth,
     TrackCount,
     IgnoreSilence,
+    /// `MenuBox.chooseItem`: handles the "exit to desktop" menu entry.
+    MenuChooseItem,
 }
 
-const ALL: [GmeFn; 20] = [
+/// Label of the main/pause menu entry that quits the program. The SWF patch
+/// renames the (offline-useless) "links" entry to this.
+pub const EXIT_ITEM: &str = "exit to desktop";
+
+const ALL: [GmeFn; 21] = [
     GmeFn::TypeGbs, GmeFn::TypeKss, GmeFn::TypeNsf, GmeFn::TypeNsfe, GmeFn::TypeSap,
     GmeFn::TypeSpc, GmeFn::NewEmu, GmeFn::Delete, GmeFn::LoadData, GmeFn::StartTrack,
     GmeFn::Play, GmeFn::PlayFloat, GmeFn::TrackEnded, GmeFn::Tell, GmeFn::Seek,
     GmeFn::SetFade, GmeFn::SetTempo, GmeFn::SetStereoDepth, GmeFn::TrackCount,
-    GmeFn::IgnoreSilence,
+    GmeFn::IgnoreSilence, GmeFn::MenuChooseItem,
 ];
 
 fn classify(name: &str) -> Option<GmeFn> {
+    if name == "com.smbc.messageBoxes::MenuBox/chooseItem()" {
+        return Some(GmeFn::MenuChooseItem);
+    }
     // Static methods of the SWIG facade class `libgme` (top-level package).
     let rest = name.strip_prefix("libgme$/")?;
     let rest = rest.strip_prefix("get ").unwrap_or(rest);
@@ -116,7 +125,29 @@ fn result<'gc>(activation: &mut Activation<'_, 'gc>, r: Option<Result<(), String
     }
 }
 
+/// Returns `None` to let the original ActionScript method run.
 pub fn call<'gc>(
+    f: GmeFn,
+    args: FunctionArgs<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Option<Result<Value<'gc>, Error<'gc>>> {
+    if f == GmeFn::MenuChooseItem {
+        let item = args.to_slice().first().copied().unwrap_or(Value::Undefined);
+        let is_exit = match item {
+            Value::String(s) => s.to_utf8_lossy() == EXIT_ITEM,
+            _ => false,
+        };
+        if is_exit {
+            tracing::info!("SMBC: exit to desktop chosen");
+            activation.context.external_interface.invoke_fs_command("quit", "");
+            return Some(Ok(Value::Undefined));
+        }
+        return None;
+    }
+    Some(call_gme(f, args, activation))
+}
+
+fn call_gme<'gc>(
     f: GmeFn,
     args: FunctionArgs<'_, 'gc>,
     activation: &mut Activation<'_, 'gc>,
@@ -261,6 +292,6 @@ pub fn call<'gc>(
             let id = int(0, activation)?;
             Value::Integer(with_emu(id, |emu| emu.track_count()).unwrap_or(0))
         }
-        GmeFn::IgnoreSilence => Value::Undefined,
+        GmeFn::IgnoreSilence | GmeFn::MenuChooseItem => Value::Undefined,
     })
 }

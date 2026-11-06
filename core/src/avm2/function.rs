@@ -243,8 +243,10 @@ pub fn exec<'gc>(
     let mc = activation.gc();
 
     #[cfg(feature = "smbc_gme")]
-    if let Some(f) = super::smbc_gme::lookup(method) {
-        return super::smbc_gme::call(f, user_arguments, activation);
+    if let Some(f) = super::smbc_gme::lookup(method)
+        && let Some(result) = super::smbc_gme::call(f, user_arguments, activation)
+    {
+        return result;
     }
 
     #[cfg(feature = "smbc_profile")]
