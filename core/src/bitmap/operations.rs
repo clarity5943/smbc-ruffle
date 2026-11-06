@@ -925,21 +925,46 @@ pub fn color_bounds_rect(
         .to_premultiplied_alpha(target.transparency())
         .to_bgra_u32();
 
-    for x in 0..target.width() {
-        for y in 0..target.height() {
-            let pixel_raw: u32 = target.get_pixel32_raw(x, y).into();
-            let color_matches = if find_color {
-                (pixel_raw & mask) == color
+    // Row-major scan over the raw pixels (the old column-major per-pixel loop was
+    // cache-hostile and dominated SMBC's frame time via trimBmp/getVisibleBounds).
+    // Find the first/last matching rows, then only scan row ends for x extents.
+    let width = target.width() as usize;
+    let height = target.height() as usize;
+    if width > 0 && height > 0 {
+        let pixels = target.raw_pixels();
+        let matches = |c: &Color| {
+            let raw: u32 = (*c).into();
+            if find_color {
+                (raw & mask) == color
             } else {
-                (pixel_raw & mask) != color
-            };
-
-            if color_matches {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
+                (raw & mask) != color
             }
+        };
+        let rows = || pixels.chunks_exact(width).take(height);
+        if let Some(top) = rows().position(|row| row.iter().any(matches)) {
+            let bottom = height - 1 - rows().rev().position(|row| row.iter().any(matches)).unwrap_or(0);
+            min_y = top as u32;
+            max_y = bottom as u32;
+            let mut lo = width;
+            let mut hi = 0usize;
+            for row in pixels.chunks_exact(width).skip(top).take(bottom - top + 1) {
+                // Only the parts of the row outside the current [lo, hi] range can widen it.
+                if let Some(i) = row[..lo.min(width)].iter().position(matches) {
+                    lo = i;
+                }
+                let start = (hi + 1).max(lo);
+                if start < width
+                    && let Some(i) = row[start..].iter().rposition(matches)
+                {
+                    hi = start + i;
+                }
+                if lo == 0 && hi == width - 1 {
+                    break;
+                }
+            }
+            // `hi` may still be 0 if the only matches are in column `lo`.
+            min_x = lo as u32;
+            max_x = hi.max(lo) as u32;
         }
     }
 
@@ -1556,6 +1581,7 @@ pub fn draw<'gc>(
     let image = context
         .renderer
         .render_offscreen(handle, commands, quality, dirty_region);
+    crate::SMBC_OFFSCREEN_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     match image {
         Some(sync_handle) => {

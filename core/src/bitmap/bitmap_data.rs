@@ -526,6 +526,7 @@ mod wrapper {
                 .borrow_mut();
             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
                 DirtyState::GpuModified(sync_handle, bounds) => {
+                    crate::SMBC_GPU_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     renderer
                         .resolve_sync_handle(
                             sync_handle,

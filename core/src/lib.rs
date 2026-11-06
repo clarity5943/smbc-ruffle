@@ -16,7 +16,11 @@ extern crate num_derive;
 mod avm1;
 mod avm2;
 #[cfg(feature = "smbc_profile")]
-pub use avm2::profile_dump;
+pub use avm2::{profile_dump, profile_reset};
+/// SMBC diagnostics: number of GPU -> CPU bitmap readbacks (each one stalls until the GPU catches up).
+pub static SMBC_GPU_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// SMBC diagnostics: number of BitmapData.draw offscreen renders.
+pub static SMBC_OFFSCREEN_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 mod avm_rng;
 mod binary_data;
 pub mod bitmap;

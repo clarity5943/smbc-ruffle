@@ -38,6 +38,8 @@ impl LogBackend for Log {
     }
 }
 
+thread_local!(static STATS: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new()));
+
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).with_writer(std::io::stderr).init();
     let args: Vec<String> = std::env::args().collect();
@@ -111,16 +113,28 @@ fn main() {
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         if ms < dt { std::thread::sleep(Duration::from_secs_f64((dt - ms) / 1000.0)); }
         total_ms += ms;
+        if let Ok(from) = std::env::var("SMBC_STATS_FROM") {
+            let from: u64 = from.parse().unwrap();
+            if f >= from { STATS.with(|st| st.borrow_mut().push(ms)); }
+            #[cfg(feature = "profile")]
+            if f + 1 == from { ruffle_core::profile_reset(); }
+        }
         if ms > 30.0 {
             slow += 1;
             if slow < 400 {
                 println!("[{:7.2}s] frame {f}: {ms:.1} ms", start.elapsed().as_secs_f64());
             }
         }
+        #[cfg(feature = "profile")]
+        if f % 300 == 0 {
+            println!("[{:7.2}s] frame {f}: gpu syncs so far {}", start.elapsed().as_secs_f64(), ruffle_core::SMBC_GPU_SYNCS.load(std::sync::atomic::Ordering::Relaxed));
+        }
         if f % 600 == 0 {
             println!("[{:7.2}s] frame {f} avg so far {:.2} ms", start.elapsed().as_secs_f64(), total_ms / (f + 1) as f64);
         }
     }
+    #[cfg(feature = "profile")]
+    ruffle_core::profile_dump(80);
     {
         let o = out.lock().unwrap();
         let mut w: Vec<u8> = Vec::new();
@@ -132,5 +146,14 @@ fn main() {
         for v in o.iter() { w.extend_from_slice(&v.to_le_bytes()); }
         std::fs::write("/tmp/smbc_out.wav", w).unwrap();
     }
+    STATS.with(|st| {
+        let mut v = st.borrow().clone();
+        if !v.is_empty() {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = v.len();
+            println!("frame ms over {n} frames: avg {:.2} p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}",
+                v.iter().sum::<f64>() / n as f64, v[n / 2], v[n * 9 / 10], v[n * 99 / 100], v[n - 1]);
+        }
+    });
     println!("done: {frames} frames in {:.1}s, avg {:.2} ms, slow frames {slow}", start.elapsed().as_secs_f64(), total_ms / frames as f64);
 }

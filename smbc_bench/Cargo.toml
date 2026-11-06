@@ -9,3 +9,6 @@ ruffle_core = { path = "../core", features = ["audio", "mp3", "aac", "nellymoser
 ruffle_render_wgpu = { path = "../render/wgpu" }
 image = { workspace = true, features = ["png"] }
 tracing-subscriber = { workspace = true }
+
+[features]
+profile = ["ruffle_core/smbc_profile"]

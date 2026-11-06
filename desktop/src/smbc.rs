@@ -204,3 +204,74 @@ fn write_default_options(data: &std::path::Path) {
 ";
     let _ = std::fs::write(path, text);
 }
+
+/// Lightweight frame-time statistics written to the log, so slow stages can be
+/// diagnosed from `ruffle.log` after a play session.
+pub struct Perf {
+    window_start: std::time::Instant,
+    tick_ms: Vec<f32>,
+    render_ms: Vec<f32>,
+    present_ms: Vec<f32>,
+}
+
+impl Default for Perf {
+    fn default() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            tick_ms: Vec::with_capacity(1024),
+            render_ms: Vec::with_capacity(1024),
+            present_ms: Vec::with_capacity(1024),
+        }
+    }
+}
+
+impl Perf {
+    pub fn tick(&mut self, ms: f32) {
+        if ms > 50.0 {
+            tracing::info!(target: "smbc_perf", "slow update: {ms:.1} ms");
+        }
+        self.tick_ms.push(ms);
+        self.maybe_report();
+    }
+    pub fn render(&mut self, ms: f32) {
+        if ms > 50.0 {
+            tracing::info!(target: "smbc_perf", "slow render: {ms:.1} ms");
+        }
+        self.render_ms.push(ms);
+    }
+    pub fn present(&mut self, ms: f32) {
+        self.present_ms.push(ms);
+    }
+    fn maybe_report(&mut self) {
+        let elapsed = self.window_start.elapsed().as_secs_f32();
+        if elapsed < 10.0 {
+            return;
+        }
+        fn stats(v: &mut [f32]) -> String {
+            if v.is_empty() {
+                return "-".into();
+            }
+            v.sort_by(|a, b| a.total_cmp(b));
+            let avg = v.iter().sum::<f32>() / v.len() as f32;
+            format!(
+                "avg {avg:.1} p95 {:.1} max {:.1}",
+                v[(v.len() * 95 / 100).min(v.len() - 1)],
+                v[v.len() - 1]
+            )
+        }
+        use std::sync::atomic::Ordering::Relaxed;
+        let syncs = ruffle_core::SMBC_GPU_SYNCS.swap(0, Relaxed);
+        let draws = ruffle_core::SMBC_OFFSCREEN_DRAWS.swap(0, Relaxed);
+        tracing::info!(
+            target: "smbc_perf",
+            "{:.0} presents/s | update ms: {} | render ms: {} | present ms: {} | gpu readbacks/s {:.1} | offscreen draws/s {:.1}",
+            self.present_ms.len() as f32 / elapsed,
+            stats(&mut self.tick_ms),
+            stats(&mut self.render_ms),
+            stats(&mut self.present_ms),
+            syncs as f32 / elapsed,
+            draws as f32 / elapsed
+        );
+        *self = Self::default();
+    }
+}

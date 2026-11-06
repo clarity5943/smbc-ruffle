@@ -141,6 +141,34 @@ pub fn run_inner_goto_frame<'gc>(
     // so no separate cleanup is performed on ones registered during frame script phase
     context.frame_script_cleanup_queue.clear();
 
+    // SMBC fast path: a goto on a clip that is not on the display list (SMBC
+    // steps through every frame of off-stage template clips while building its
+    // sprite caches) only changes that clip's own tree. Walking the whole stage
+    // and every other orphan for each such goto made it O(display objects) per
+    // call, causing long stalls whenever a level spawns new object types.
+    #[cfg(feature = "smbc_gme")]
+    if !initial_clip.is_on_stage(context) {
+        let mut root: DisplayObject<'gc> = initial_clip.into();
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        *context.frame_phase = FramePhase::Construct;
+        root.construct_frame(context);
+        broadcast_frame_constructed(context);
+
+        *context.frame_phase = FramePhase::FrameScripts;
+        root.run_frame_scripts(context);
+        for child in removed_frame_scripts {
+            child.run_frame_scripts(context);
+        }
+
+        *context.frame_phase = FramePhase::Exit;
+        broadcast_frame_exited(context);
+        context.orphan_manager.cleanup_dead_orphans(context.gc());
+        *context.frame_phase = old_phase;
+        return;
+    }
+
     // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
 
     *context.frame_phase = FramePhase::Construct;

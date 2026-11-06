@@ -247,6 +247,19 @@ pub fn exec<'gc>(
         return super::smbc_gme::call(f, user_arguments, activation);
     }
 
+    #[cfg(feature = "smbc_profile")]
+    let __prof_key = {
+        let key = Gc::as_ptr(method.0) as *const () as usize;
+        profile::enter(key, || {
+            let mut name = WString::new();
+            display_function(&mut name, method);
+            name.to_utf8_lossy().into_owned()
+        });
+        key
+    };
+    #[cfg(feature = "smbc_profile")]
+    let __prof_guard = profile::Guard(__prof_key);
+
     let caller_dxns = activation.default_xml_namespace();
 
     let ret = match method.method_kind() {
@@ -362,21 +375,7 @@ pub fn exec<'gc>(
 
             activation.context.avm2.push_call(mc, method);
 
-            #[cfg(feature = "smbc_profile")]
-            let __prof_key = {
-                let key = Gc::as_ptr(method.0) as *const () as usize;
-                profile::enter(key, || {
-                    let mut name = WString::new();
-                    display_function(&mut name, method);
-                    name.to_utf8_lossy().into_owned()
-                });
-                key
-            };
-
             let result = activation.run_actions(method);
-
-            #[cfg(feature = "smbc_profile")]
-            profile::exit(__prof_key);
 
             activation.cleanup();
 
@@ -494,11 +493,15 @@ pub mod profile {
             p.stack.push((key, Instant::now(), 0));
         });
     }
+    pub struct Guard(pub usize);
+    impl Drop for Guard {
+        fn drop(&mut self) { exit(self.0) }
+    }
     pub fn exit(key: usize) {
         P.with(|p| {
             let mut p = p.borrow_mut();
-            if let Some((k, t, child)) = p.stack.pop() {
-                debug_assert_eq!(k, key);
+            if !p.stack.iter().any(|(k, _, _)| *k == key) { return; }
+            while let Some((k, t, child)) = p.stack.pop() {
                 let el = t.elapsed().as_nanos();
                 if let Some(parent) = p.stack.last_mut() { parent.2 += el; }
                 let recursive = p.stack.iter().any(|(pk, _, _)| *pk == k);
@@ -506,7 +509,13 @@ pub mod profile {
                 e.count += 1;
                 if !recursive { e.incl += el; }
                 e.selft += el.saturating_sub(child);
+                if k == key { break; }
             }
+        });
+    }
+    pub fn reset() {
+        P.with(|p| {
+            for e in p.borrow_mut().map.values_mut() { e.count = 0; e.incl = 0; e.selft = 0; }
         });
     }
     pub fn dump(top: usize) {

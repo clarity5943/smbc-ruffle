@@ -61,6 +61,8 @@ mod function;
 mod smbc_gme;
 #[cfg(feature = "smbc_profile")]
 pub use function::profile::dump as profile_dump;
+#[cfg(feature = "smbc_profile")]
+pub use function::profile::reset as profile_reset;
 pub mod globals;
 mod index;
 mod metadata;

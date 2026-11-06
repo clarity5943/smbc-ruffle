@@ -52,6 +52,7 @@ struct MainWindow {
     /// Left-stick directions currently reported as D-pad presses: up, down, left, right.
     stick_dirs: [bool; 4],
     stick_axes: [f32; 2],
+    perf: std::cell::RefCell<crate::smbc::Perf>,
 }
 
 impl MainWindow {
@@ -90,7 +91,9 @@ impl MainWindow {
             // surface also keeps the size it had before, as `GuiController::resize`
             // refuses to reconfigure it to a zero size.
             if !self.minimized && !self.occluded {
+                let t0 = Instant::now();
                 self.gui.render(self.player.get());
+                self.perf.borrow_mut().present(t0.elapsed().as_secs_f32() * 1000.0);
             }
 
             // Important that we return here, or we'll get a feedback loop with egui
@@ -451,10 +454,12 @@ impl MainWindow {
             let dt = FloatDuration::from_std(new_time.duration_since(self.time));
             if dt.as_millis() > 0.0 {
                 self.time = new_time;
+                let t0 = Instant::now();
                 self.next_frame_time = self.player.get().map(|mut player| {
                     player.tick(dt);
                     new_time + player.time_til_next_frame()
                 });
+                self.perf.borrow_mut().tick(t0.elapsed().as_secs_f32() * 1000.0);
             }
         }
 
@@ -490,7 +495,9 @@ impl MainWindow {
             && !self.occluded
             && let Some(player) = player.as_deref_mut()
         {
+            let t0 = Instant::now();
             player.render();
+            self.perf.borrow_mut().render(t0.elapsed().as_secs_f32() * 1000.0);
         }
         if player_needs_render || self.gui.needs_render() {
             self.gui.window().request_redraw();
@@ -660,6 +667,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 event_loop_proxy,
                 stick_dirs: [false; 4],
                 stick_axes: [0.0, 0.0],
+                perf: Default::default(),
             });
         }
     }
