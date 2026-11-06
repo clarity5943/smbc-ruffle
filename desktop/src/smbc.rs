@@ -228,14 +228,14 @@ impl Default for Perf {
 impl Perf {
     pub fn tick(&mut self, ms: f32) {
         if ms > 50.0 {
-            tracing::info!(target: "smbc_perf", "slow update: {ms:.1} ms");
+            tracing::info!("slow update: {ms:.1} ms");
         }
         self.tick_ms.push(ms);
         self.maybe_report();
     }
     pub fn render(&mut self, ms: f32) {
         if ms > 50.0 {
-            tracing::info!(target: "smbc_perf", "slow render: {ms:.1} ms");
+            tracing::info!("slow render: {ms:.1} ms");
         }
         self.render_ms.push(ms);
     }
@@ -263,7 +263,7 @@ impl Perf {
         let syncs = ruffle_core::SMBC_GPU_SYNCS.swap(0, Relaxed);
         let draws = ruffle_core::SMBC_OFFSCREEN_DRAWS.swap(0, Relaxed);
         tracing::info!(
-            target: "smbc_perf",
+            
             "{:.0} presents/s | update ms: {} | render ms: {} | present ms: {} | gpu readbacks/s {:.1} | offscreen draws/s {:.1}",
             self.present_ms.len() as f32 / elapsed,
             stats(&mut self.tick_ms),

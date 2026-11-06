@@ -144,7 +144,7 @@ pub fn call<'gc>(
                 x if x == GmeFn::TypeSpc as i32 => EmuType::Spc,
                 _ => return Ok(Value::Integer(0)),
             };
-            tracing::info!("SMBC libgme: new {ty:?} emulator at {rate} Hz");
+            tracing::debug!("SMBC libgme: new {ty:?} emulator at {rate} Hz");
             match Emu::new(ty, rate) {
                 Some(emu) => EMUS.with(|e| {
                     let mut e = e.borrow_mut();
@@ -170,7 +170,7 @@ pub fn call<'gc>(
                 let dm = dm.storage();
                 dm.bytes().get(ptr..ptr + size).map(|b| b.to_vec())
             };
-            tracing::info!("SMBC libgme: load_data {size} bytes");
+            tracing::debug!("SMBC libgme: load_data {size} bytes");
             let r = match data {
                 Some(data) => with_emu(id, |emu| emu.load_data(&data)),
                 None => Some(Err("load_data: out of bounds".to_string())),
