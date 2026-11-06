@@ -40,6 +40,10 @@ pub enum WideFn {
     BlackScreen,
     /// `new Dictionary(weakKeys)` (pre): Ruffle ignored weak keys.
     DictionaryCtor,
+    /// `LevelForeground.addScorePop(pop)`: score pops are placed at level
+    /// coordinates inside `HudAlwaysOnTop`, which the layer-scroll hook shifts
+    /// right to centre the HUD; take that shift back off the pop.
+    AddScorePop,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -60,6 +64,7 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.characters::Character/saveSkinPreviews()" => WideFn::SaveSkinPreviews,
         "com.smbc.screens::InformativeBlackScreen/initiate()" => WideFn::BlackScreen,
         "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
+        "com.smbc.level::LevelForeground/addScorePop()" => WideFn::AddScorePop,
         n if n.starts_with("com.smbc.messageBoxes::CharacterSelectBox/")
             && n.ends_with("pressedSelectCharacterButton()") =>
         {
@@ -217,6 +222,15 @@ pub fn call<'gc>(
             Hook::Replace(Ok(Value::Undefined))
         }
         WideFn::CalcLocStg => Hook::Post,
+        WideFn::AddScorePop => {
+            if let Some(pop) = args.to_slice().first().copied().filter(|v| v.as_object().is_some()) {
+                let off = hud_offset(activation);
+                if let Some(x) = get(pop, "x", activation).map(|v| num(v, activation)) {
+                    set(pop, "x", x - off, activation);
+                }
+            }
+            Hook::Pass
+        }
         WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap | WideFn::TrimBmp => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
