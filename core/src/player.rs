@@ -3335,3 +3335,45 @@ pub enum PlayerMode {
     /// Represents the debug version of Flash Player, i.e. flashplayerdebugger.
     Debug,
 }
+
+impl Player {
+    /// SMBC debugging: dump the display tree (class, name, x, y, bounds) to a string.
+    pub fn smbc_dump_tree(&mut self, max_depth: usize) -> String {
+        use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
+        fn walk<'gc>(o: DisplayObject<'gc>, d: usize, max: usize, out: &mut String, ctx: &mut UpdateContext<'gc>) {
+            let class = o
+                .object2()
+                .map(|s| { use crate::avm2::TObject; s.instance_class().name().local_name().to_string() })
+                .unwrap_or_default();
+            let b = o.world_bounds(crate::display_object::BoundsMode::Engine);
+            out.push_str(&format!(
+                "{:indent$}{} '{}' x={:.0} y={:.0} vis={} world=[{:.0},{:.0} .. {:.0},{:.0}] kids={}\n",
+                "",
+                class,
+                o.name().map(|n| n.to_string()).unwrap_or_default(),
+                o.x().to_pixels(),
+                o.y().to_pixels(),
+                o.visible(),
+                b.x_min.to_pixels(),
+                b.y_min.to_pixels(),
+                b.x_max.to_pixels(),
+                b.y_max.to_pixels(),
+                o.as_container().map(|c| c.num_children()).unwrap_or(0),
+                indent = d * 2
+            ));
+            if d < max {
+                if let Some(c) = o.as_container() {
+                    for ch in c.iter_render_list() {
+                        walk(ch, d + 1, max, out, ctx);
+                    }
+                }
+            }
+        }
+        self.mutate_with_update_context(|ctx| {
+            let mut out = String::new();
+            let stage = ctx.stage;
+            walk(stage.into(), 0, max_depth, &mut out, ctx);
+            out
+        })
+    }
+}

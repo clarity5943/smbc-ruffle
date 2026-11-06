@@ -643,6 +643,9 @@ impl<'gc> Stage<'gc> {
 
         self.render(context);
 
+        #[cfg(feature = "smbc_gme")]
+        self.smbc_draw_pillarbox(context);
+
         self.focus_tracker().render_highlight(context);
 
         if self.should_letterbox() {
@@ -650,6 +653,45 @@ impl<'gc> Stage<'gc> {
         }
 
         context.transform_stack.pop();
+    }
+
+    /// SMBC widescreen: black bars beside maps narrower than the screen.
+    #[cfg(feature = "smbc_gme")]
+    fn smbc_draw_pillarbox(self, context: &mut RenderContext<'_, 'gc>) {
+        let Some(bars) = crate::avm2::smbc_wide::bars() else {
+            return;
+        };
+        let Some(root) = self.root_clip().and_then(|r| r.as_container()) else {
+            return;
+        };
+        let Some(level) = root
+            .iter_render_list()
+            .find(|c| c.name().is_some_and(|n| n.to_string() == bars.level_name))
+        else {
+            return;
+        };
+        let (movie_w, movie_h) = self.0.movie_size.get();
+        let (movie_w, movie_h) = (movie_w as f64, movie_h as f64);
+        let left = level.x().to_pixels().clamp(0.0, movie_w);
+        let right = (level.x().to_pixels() + bars.map_width).clamp(0.0, movie_w);
+        let view = self.0.viewport_matrix.get();
+        // Draw a little beyond the stage so nothing peeks through at the edges.
+        let pad = 64.0;
+        let mut rect = |x0: f64, x1: f64| {
+            if x1 - x0 < 0.5 {
+                return;
+            }
+            let m = view
+                * Matrix::create_box(
+                    (x1 - x0) as f32,
+                    (movie_h + pad * 2.0) as f32,
+                    Twips::from_pixels(x0),
+                    Twips::from_pixels(-pad),
+                );
+            context.commands.draw_rect(Color::BLACK, m);
+        };
+        rect(-pad, left);
+        rect(right, movie_w + pad);
     }
 
     /// Draw the stage's letterbox.

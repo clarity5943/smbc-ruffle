@@ -10,6 +10,7 @@ use super::function::{FunctionArgs, display_function};
 use super::method::Method;
 use super::{Activation, Error, Value};
 use crate::string::{AvmString, WString};
+use super::smbc_wide::WideFn;
 use smbc_gme::{Emu, EmuType};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -86,21 +87,44 @@ fn classify(name: &str) -> Option<GmeFn> {
     })
 }
 
-pub fn lookup(method: Method<'_>) -> Option<GmeFn> {
+#[derive(Clone, Copy, Debug)]
+pub enum Override {
+    Gme(GmeFn),
+    Wide(WideFn),
+}
+
+const WIDE: [WideFn; 5] = [
+    WideFn::LayerScroll,
+    WideFn::TopTextScroll,
+    WideFn::CalcLocStg,
+    WideFn::SaveSkinPreviews,
+    WideFn::BlackScreen,
+];
+
+pub fn lookup(method: Method<'_>) -> Option<Override> {
     let cell = &method.0.gme_override;
     match cell.get() {
         0 => {
             let mut name = WString::new();
             display_function(&mut name, method);
-            let found = classify(&name.to_utf8_lossy());
-            if let Some(f) = found {
-                tracing::info!("SMBC: native libgme override for {}", name);
-            }
-            cell.set(found.map(|f| f as u8 + 2).unwrap_or(1));
+            let name_s = name.to_utf8_lossy();
+            let found = if let Some(f) = classify(&name_s) {
+                tracing::info!("SMBC: native override for {}", name);
+                cell.set(f as u8 + 2);
+                Some(Override::Gme(f))
+            } else if let Some(w) = super::smbc_wide::classify(&name_s) {
+                tracing::info!("SMBC: widescreen hook for {}", name);
+                cell.set(200 + WIDE.iter().position(|x| *x == w).unwrap() as u8);
+                Some(Override::Wide(w))
+            } else {
+                cell.set(1);
+                None
+            };
             found
         }
         1 => None,
-        n => Some(ALL[(n - 2) as usize]),
+        n if n >= 200 => Some(Override::Wide(WIDE[(n - 200) as usize])),
+        n => Some(Override::Gme(ALL[(n - 2) as usize])),
     }
 }
 

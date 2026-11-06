@@ -59,6 +59,8 @@ mod flv;
 mod function;
 #[cfg(feature = "smbc_gme")]
 mod smbc_gme;
+#[cfg(feature = "smbc_gme")]
+pub mod smbc_wide;
 #[cfg(feature = "smbc_profile")]
 pub use function::profile::dump as profile_dump;
 #[cfg(feature = "smbc_profile")]

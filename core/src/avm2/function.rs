@@ -243,11 +243,22 @@ pub fn exec<'gc>(
     let mc = activation.gc();
 
     #[cfg(feature = "smbc_gme")]
-    if let Some(f) = super::smbc_gme::lookup(method)
-        && let Some(result) = super::smbc_gme::call(f, user_arguments, activation)
-    {
-        return result;
-    }
+    let smbc_post = match super::smbc_gme::lookup(method) {
+        Some(super::smbc_gme::Override::Gme(f)) => {
+            if let Some(result) = super::smbc_gme::call(f, user_arguments, activation) {
+                return result;
+            }
+            None
+        }
+        Some(super::smbc_gme::Override::Wide(w)) => {
+            match super::smbc_wide::call(w, receiver, activation) {
+                super::smbc_wide::Hook::Replace(r) => return r,
+                super::smbc_wide::Hook::Pass => None,
+                super::smbc_wide::Hook::Post => Some(w),
+            }
+        }
+        None => None,
+    };
 
     #[cfg(feature = "smbc_profile")]
     let __prof_key = {
@@ -385,6 +396,12 @@ pub fn exec<'gc>(
         }
     };
     activation.context.avm2.pop_call(mc);
+    #[cfg(feature = "smbc_gme")]
+    if let Some(w) = smbc_post
+        && ret.is_ok()
+    {
+        super::smbc_wide::post(w, receiver, activation);
+    }
     ret
 }
 

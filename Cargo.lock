@@ -4813,6 +4813,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_extras",
+ "flate2",
  "fluent-templates",
  "fontconfig",
  "fontdb",

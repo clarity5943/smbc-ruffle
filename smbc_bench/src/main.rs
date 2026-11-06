@@ -85,6 +85,8 @@ fn main() {
                         "left" => (PhysicalKey::ArrowLeft, LogicalKey::Named(NamedKey::ArrowLeft)),
                         "up" => (PhysicalKey::ArrowUp, LogicalKey::Named(NamedKey::ArrowUp)),
                         "down" => (PhysicalKey::ArrowDown, LogicalKey::Named(NamedKey::ArrowDown)),
+                        "a" => (PhysicalKey::KeyA, LogicalKey::Character('a')),
+                        "c" => (PhysicalKey::KeyC, LogicalKey::Character('c')),
                         _ => panic!("key {key}"),
                     };
                     let k = KeyDescriptor { physical_key: pk, logical_key: lk, key_location: KeyLocation::Standard };
@@ -102,11 +104,17 @@ fn main() {
             p.update_timers(ruffle_core::FloatDuration::from_millis(dt));
             p.audio_mut().tick();
             p.render();
+            if let Ok(at) = std::env::var("SMBC_DUMP_AT") {
+                if at.split(',').any(|a| a.parse::<u64>().ok() == Some(f)) {
+                    let depth = std::env::var("SMBC_DUMP_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(3);
+                    println!("=== display tree at frame {f} ===\n{}", p.smbc_dump_tree(depth));
+                }
+            }
             if let Ok(every) = std::env::var("SMBC_SHOT_EVERY") {
                 let every: u64 = every.parse().unwrap();
                 if f % every == 0 {
                     let r = <dyn std::any::Any>::downcast_mut::<WgpuRenderBackend<TextureTarget>>(p.renderer_mut()).unwrap();
-                    if let Some(img) = r.capture_frame() { let _ = img.save(format!("/tmp/frames/f{f:05}.png")); }
+                    if let Some(img) = r.capture_frame() { let _ = img.save(format!("{}/f{f:05}.png", std::env::var("SMBC_FRAMES").unwrap_or("/tmp/frames".into()))); }
                 }
             }
         }

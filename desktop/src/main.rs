@@ -16,6 +16,7 @@ mod log;
 mod player;
 mod preferences;
 mod smbc;
+mod smbc_wide;
 #[cfg(feature = "tracy")]
 mod tracy;
 mod util;

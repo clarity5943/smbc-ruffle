@@ -107,6 +107,35 @@ pub fn build_args() -> Vec<OsString> {
         })
     };
 
+    // Widescreen: "--widescreen=auto" (default), "--widescreen=off" or a stage width.
+    let wide_opt = given
+        .iter()
+        .rev()
+        .find_map(|a| a.strip_prefix("--widescreen=").map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| "auto".into());
+    let display = crate::smbc_wide::primary_display_size();
+    let wide_w = match wide_opt.as_str() {
+        "off" | "no" | "false" | "0" | "4:3" => crate::smbc_wide::ORIGINAL_WIDTH,
+        "auto" | "on" | "yes" | "true" => display
+            .map(|(w, h)| crate::smbc_wide::width_for_display(w, h))
+            .unwrap_or(crate::smbc_wide::ORIGINAL_WIDTH),
+        n => n
+            .parse::<u32>()
+            .map(|w| (w / 16 * 16).clamp(crate::smbc_wide::ORIGINAL_WIDTH, 2048))
+            .unwrap_or(crate::smbc_wide::ORIGINAL_WIDTH),
+    };
+    let mut movie = swf.clone();
+    if wide_w > crate::smbc_wide::ORIGINAL_WIDTH {
+        match crate::smbc_wide::widened_movie(&swf, &data.join("cache").join("widescreen"), wide_w) {
+            Ok(p) => movie = p,
+            Err(e) => {
+                tracing::warn!("widescreen disabled: {e}");
+                eprintln!("widescreen disabled: {e}");
+            }
+        }
+    }
+    let stage_w = if movie != swf { wide_w } else { crate::smbc_wide::ORIGINAL_WIDTH };
+
     let mut args: Vec<OsString> = vec![exe];
     let mut push = |s: String| args.push(OsString::from(s));
 
@@ -123,8 +152,14 @@ pub fn build_args() -> Vec<OsString> {
         push("--letterbox=on".into());
     }
     if !has(&["--width"]) && !has(&["--height"]) {
-        push("--width=1024".into());
-        push("--height=960".into());
+        // Twice the original size, shrunk to fit the screen.
+        let mut scale = 2.0f64;
+        if let Some((dw, dh)) = display {
+            scale = scale.min(0.85 * dh as f64 / 480.0).min(0.9 * dw as f64 / stage_w as f64);
+        }
+        let scale = scale.max(1.0);
+        push(format!("--width={}", (stage_w as f64 * scale).round()));
+        push(format!("--height={}", (480.0 * scale).round()));
     }
     if !has(&["--max-execution-duration"]) {
         // Start-up pre-renders every sound effect through the game's music
@@ -153,10 +188,14 @@ pub fn build_args() -> Vec<OsString> {
     args.extend(
         extra
             .into_iter()
-            .filter(|a| a != "--show-gui" && a != "--no-force-scale"),
+            .filter(|a| {
+                a != "--show-gui"
+                    && a != "--no-force-scale"
+                    && !a.to_string_lossy().starts_with("--widescreen")
+            }),
     );
     if !has_movie {
-        args.push(swf.into_os_string());
+        args.push(movie.into_os_string());
     }
     args
 }
@@ -173,6 +212,11 @@ fn write_default_options(data: &std::path::Path) {
 #
 # Start in fullscreen:
 #--fullscreen
+#
+# Widescreen: auto fills your monitor's shape (default), off plays in the
+# original 4:3, or give a width in game pixels (the game is 480 high;
+# 848 = 16:9, 1152 = 21:9 ultrawide, 1712 = 32:9).
+#--widescreen=off
 #
 # Show Ruffle's menu bar:
 #--show-gui
