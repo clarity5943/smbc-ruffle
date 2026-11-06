@@ -350,6 +350,22 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
 
                 self.set_avm2_object(activation.gc(), Some(bitmap_obj));
 
+                if self.avm2_bitmapdata_class().is_none() {
+                    // No BitmapData subclass is linked to this image: the stock
+                    // BitmapData constructor has no symbol to load from and would
+                    // replace the image with a blank 1x1 bitmap. Keep the decoded
+                    // image instead, as Flash Player does. (SMBC: every animated
+                    // background is built from such timeline bitmaps.)
+                    let bitmap_data = self.0.bitmap_data.get();
+                    Avm2BitmapDataObject::from_bitmap_data_and_class(
+                        activation.gc(),
+                        bitmap_data,
+                        bitmapdata_cls,
+                    );
+                    self.on_construction_complete(activation.context);
+                    return;
+                }
+
                 // Use a dummy BitmapData when calling the constructor on the user subclass
                 // - the constructor should see an invalid BitmapData before calling 'super',
                 // even if it's linked to an image.

@@ -62,5 +62,9 @@ impl AvmRng {
 
 // https://github.com/adobe-flash/avmplus/blob/65a05927767f3735db37823eebf7d743531f5d37/VMPI/PosixSpecificUtils.cpp#L18
 fn get_seed(locale: &dyn LocaleBackend) -> u32 {
+    // SMBC test bench: reproducible runs.
+    if let Some(seed) = std::env::var("SMBC_SEED").ok().and_then(|s| s.parse().ok()) {
+        return seed;
+    }
     locale.get_current_date_time().timestamp_micros() as u32
 }

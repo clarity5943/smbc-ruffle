@@ -119,7 +119,8 @@ pub fn call<'gc>(
     activation: &mut Activation<'_, 'gc>,
 ) -> Hook<'gc> {
     if f == WideFn::DictionaryCtor {
-        let weak = args.to_slice().first().is_some_and(|v| v.coerce_to_boolean());
+        let weak = args.to_slice().first().is_some_and(|v| v.coerce_to_boolean())
+            && std::env::var_os("SMBC_NO_WEAK").is_none();
         if weak && let Some(d) = receiver.as_object().and_then(|o| o.as_dictionary_object()) {
             d.set_weak_keys(true);
         }
