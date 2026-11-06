@@ -93,13 +93,14 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 6] = [
+const WIDE: [WideFn; 7] = [
     WideFn::LayerScroll,
     WideFn::TopTextScroll,
     WideFn::CalcLocStg,
     WideFn::SaveSkinPreviews,
     WideFn::BlackScreen,
     WideFn::DictionaryCtor,
+    WideFn::MapSkinMenuSwap,
 ];
 
 pub fn lookup(method: Method<'_>) -> Option<Override> {

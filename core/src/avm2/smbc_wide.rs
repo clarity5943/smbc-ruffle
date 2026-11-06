@@ -40,6 +40,12 @@ pub enum WideFn {
     BlackScreen,
     /// `new Dictionary(weakKeys)` (pre): Ruffle ignored weak keys.
     DictionaryCtor,
+    /// `CharacterSelectBox.pressedSelectCharacterButton()` and
+    /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
+    /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
+    /// instead of `MapSkinMenu`, also while random map skin is on (the game
+    /// would only say it can't be changed).
+    MapSkinMenuSwap,
 }
 
 pub fn classify(name: &str) -> Option<WideFn> {
@@ -49,6 +55,14 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.characters::Character/saveSkinPreviews()" => WideFn::SaveSkinPreviews,
         "com.smbc.screens::InformativeBlackScreen/initiate()" => WideFn::BlackScreen,
         "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
+        n if n.starts_with("com.smbc.messageBoxes::CharacterSelectBox/")
+            && n.ends_with("pressedSelectCharacterButton()") =>
+        {
+            WideFn::MapSkinMenuSwap
+        }
+        n if n.starts_with("com.smbc.messageBoxes::GraphicsOptions/") && n.ends_with("chooseItem()") => {
+            WideFn::MapSkinMenuSwap
+        }
         n if n.starts_with("com.smbc.level::Level/") && n.ends_with("calcLocStgPos()") => {
             WideFn::CalcLocStg
         }
@@ -126,6 +140,9 @@ pub fn call<'gc>(
         }
         return Hook::Pass;
     }
+    if f == WideFn::MapSkinMenuSwap {
+        return Hook::Post;
+    }
     let stage_w = stage_width(activation);
     if stage_w <= ORIGINAL_WIDTH {
         return Hook::Pass;
@@ -186,7 +203,7 @@ pub fn call<'gc>(
             Hook::Replace(Ok(Value::Undefined))
         }
         WideFn::CalcLocStg => Hook::Post,
-        WideFn::DictionaryCtor => Hook::Pass,
+        WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -209,7 +226,57 @@ pub fn call<'gc>(
     }
 }
 
+fn swap_map_skin_menu<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let Some(next) = get(receiver, "nextMsgBxToCreate", activation).and_then(|v| v.as_object()) else {
+        return;
+    };
+    let class = next.instance_class().name().local_name().to_string();
+    let wanted = match class.as_str() {
+        "MapSkinMenu" => true,
+        // "You cannot change the map skin while random map skin is enabled."
+        "PlainMessageBox" => {
+            let settings = activation
+                .domain()
+                .get_defined_value_handling_vector(
+                    activation,
+                    AvmString::new_utf8(activation.gc(), "com.smbc.data.GameSettings"),
+                )
+                .ok();
+            settings
+                .and_then(|g| get(g, "randomMapSkin", activation))
+                .is_some_and(|v| v.coerce_to_boolean())
+        }
+        _ => false,
+    };
+    if !wanted {
+        return;
+    }
+    let menu_class = activation
+        .domain()
+        .get_defined_value_handling_vector(
+            activation,
+            AvmString::new_utf8(activation.gc(), "com.smbc.messageBoxes.SmbcMapSkinMenu"),
+        )
+        .ok()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.as_class_object());
+    let Some(menu_class) = menu_class else {
+        return; // older SWF without the addition
+    };
+    match menu_class.construct(activation, &[]) {
+        Ok(menu) => {
+            let name = AvmString::new_utf8(activation.gc(), "nextMsgBxToCreate");
+            let _ = receiver.set_public_property(name, menu, activation);
+        }
+        Err(e) => tracing::warn!("SMBC: SmbcMapSkinMenu failed: {e:?}"),
+    }
+}
+
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::MapSkinMenuSwap {
+        swap_map_skin_menu(receiver, activation);
+        return;
+    }
     if f != WideFn::CalcLocStg {
         return;
     }
