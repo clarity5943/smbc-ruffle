@@ -273,7 +273,7 @@ pub fn call<'gc>(
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
-            Hook::Pass
+            Hook::Post
         }
         WideFn::SaveSkinPreviews => {
             // Characters in the off-screen FakeLevel are snapshotted with code that
@@ -354,6 +354,31 @@ fn swap_map_skin_menu<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_,
             let _ = receiver.set_public_property(name, menu, activation);
         }
         Err(e) => tracing::warn!("SMBC: SmbcMapSkinMenu failed: {e:?}"),
+    }
+}
+
+/// The black screen between levels is only 512 px wide; the castle-end texts
+/// moved over the last room would show beside it, so hide them (the game
+/// removes them when the next level starts).
+fn hide_end_text<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let Some(game) = receiver
+        .as_object()
+        .and_then(|o| o.as_display_object())
+        .and_then(|d| d.parent())
+        .and_then(|p| p.as_container())
+    else {
+        return;
+    };
+    let moved = MOVED_END_TEXT.with(|m| m.borrow().1.clone());
+    let texts: Vec<_> = game
+        .iter_render_list()
+        .filter(|d| class_name(*d) == "TextFieldContainer")
+        .filter_map(|d| d.object2())
+        .map(Value::from)
+        .filter(|v| v.as_object().is_some_and(|o| moved.contains(&(o.as_ptr() as usize))))
+        .collect();
+    for t in texts {
+        let _ = t.set_public_property(AvmString::new_utf8(activation.gc(), "visible"), Value::Bool(false), activation);
     }
 }
 
@@ -503,6 +528,10 @@ fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Ac
 }
 
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::BlackScreen {
+        hide_end_text(receiver, activation);
+        return;
+    }
     if f == WideFn::WaterHazeCtor {
         if let Some(mask) = get(receiver, "mask", activation).filter(|v| v.as_object().is_some()) {
             let w = stage_width(activation);
