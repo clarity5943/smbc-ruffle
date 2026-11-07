@@ -93,7 +93,9 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 9] = [
+const WIDE: [WideFn; 11] = [
+    WideFn::EndCredits,
+    WideFn::EndText,
     WideFn::AddScorePop,
     WideFn::LayerScroll,
     WideFn::TopTextScroll,

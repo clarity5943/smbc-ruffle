@@ -44,6 +44,16 @@ pub enum WideFn {
     /// coordinates inside `HudAlwaysOnTop`, which the layer-scroll hook shifts
     /// right to centre the HUD; take that shift back off the pop.
     AddScorePop,
+    /// `ScreenManager.displayThankYouText()`, `addTxtTmrHandler()` and
+    /// `startMoveCreditsTmrHandler()` (post): the castle-end texts ("Thank
+    /// you", "...another castle", "Your quest is over", the credits) are
+    /// centred on the stage; centre them on the map's last original-width
+    /// screen instead, where the player and the Toad/Princess stand.
+    EndText,
+    /// `ScreenManager.startMoveCreditsTmrHandler()` (post): same centring for
+    /// the credits; the raised "Your quest is over" goes back below the
+    /// credits' black bars so it scrolls away like the credits do.
+    EndCredits,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -65,6 +75,15 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.screens::InformativeBlackScreen/initiate()" => WideFn::BlackScreen,
         "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
         "com.smbc.level::LevelForeground/addScorePop()" => WideFn::AddScorePop,
+        n if n.starts_with("com.smbc.managers::ScreenManager/")
+            && (n.ends_with("displayThankYouText()")
+                || n.ends_with("addTxtTmrHandler()")) =>
+        {
+            WideFn::EndText
+        }
+        n if n.starts_with("com.smbc.managers::ScreenManager/") && n.ends_with("startMoveCreditsTmrHandler()") => {
+            WideFn::EndCredits
+        }
         n if n.starts_with("com.smbc.messageBoxes::CharacterSelectBox/")
             && n.ends_with("pressedSelectCharacterButton()") =>
         {
@@ -168,6 +187,9 @@ pub fn call<'gc>(
     }
     match f {
         WideFn::LayerScroll => {
+            if std::env::var_os("SMBC_TEST_CHEATS").is_some() {
+                test_cheats(activation);
+            }
             let Some(this) = receiver.as_object().and_then(|o| o.as_display_object()) else {
                 return Hook::Pass;
             };
@@ -231,6 +253,7 @@ pub fn call<'gc>(
             }
             Hook::Pass
         }
+        WideFn::EndText | WideFn::EndCredits => Hook::Post,
         WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap | WideFn::TrimBmp => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
@@ -319,7 +342,136 @@ fn swap_map_skin_menu<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_,
     }
 }
 
+/// Bench-only (`SMBC_TEST_CHEATS`): invincible, bouncy pits, infinite time.
+fn test_cheats<'gc>(activation: &mut Activation<'_, 'gc>) {
+    let Ok(c) = activation
+        .domain()
+        .get_defined_value_handling_vector(activation, AvmString::new_utf8(activation.gc(), "com.smbc.data.Cheats"))
+    else {
+        return;
+    };
+    for k in ["invincible", "bouncyPits", "infiniteTime"] {
+        let name = AvmString::new_utf8(activation.gc(), k);
+        let _ = c.set_public_property(name, Value::Bool(true), activation);
+    }
+}
+
+thread_local! {
+    /// (level, castle-end texts already moved for it)
+    static MOVED_END_TEXT: std::cell::RefCell<(usize, Vec<usize>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// Move stage-centred `TextFieldContainer`s that sit beside the level to the
+/// centre of the map's last 512 px. The game puts them just below the level,
+/// where a wall in the wider view can hide them, so the castle texts are also
+/// raised to just above the level (still below the HUD).
+fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let stage_w = stage_width(activation);
+    if stage_w <= ORIGINAL_WIDTH {
+        return;
+    }
+    // Called from a timer event the activation's domain is the system one, so
+    // look the class up in the domain of the receiver's (game) class.
+    let domain = receiver
+        .as_object()
+        .and_then(|o| o.instance_class().translation_unit())
+        .map(|t| t.domain())
+        .unwrap_or_else(|| activation.domain());
+    let level = domain
+        .get_defined_value_handling_vector(activation, AvmString::new_utf8(activation.gc(), "com.smbc.level.Level"))
+        .ok()
+        .and_then(|c| get(c, "levelInstance", activation))
+        .filter(|v| v.as_object().is_some());
+    let Some(level) = level else { return };
+    let Some(level_do) = level.as_object().and_then(|o| o.as_display_object()) else { return };
+    let Some(game) = level_do.parent().and_then(|p| p.as_container()) else { return };
+    let map_w = get(level, "mapWidth", activation).map(|v| num(v, activation)).unwrap_or(f64::NAN);
+    let lx = get(level, "x", activation).map(|v| num(v, activation)).unwrap_or(f64::NAN);
+    if !(map_w.is_finite() && lx.is_finite() && map_w > 0.0) {
+        return;
+    }
+    let center = (lx + map_w - ORIGINAL_WIDTH / 2.0).round();
+    let level_ptr = level.as_object().map(|o| o.as_ptr() as usize).unwrap_or(0);
+    let texts: Vec<_> = game
+        .iter_render_list()
+        .filter(|d| class_name(*d) == "TextFieldContainer")
+        .filter_map(|d| d.object2())
+        .collect();
+    let shift = center - stage_w / 2.0;
+    let mut fresh_texts = Vec::new();
+    let mut old_texts = Vec::new();
+    for t in texts {
+        let ptr = Value::from(t).as_object().map(|o| o.as_ptr() as usize).unwrap_or(0);
+        let fresh = MOVED_END_TEXT.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.0 != level_ptr {
+                *m = (level_ptr, Vec::new());
+            }
+            if m.1.contains(&ptr) {
+                false
+            } else {
+                m.1.push(ptr);
+                true
+            }
+        });
+        let t: Value<'gc> = t.into();
+        if fresh {
+            let x = get(t, "x", activation).map(|v| num(v, activation)).unwrap_or(f64::NAN);
+            if x.is_finite() {
+                set(t, "x", x + shift, activation);
+            }
+            fresh_texts.push(t);
+        } else {
+            old_texts.push(t);
+        }
+    }
+    let Some(game_v) = level_do.parent().and_then(|p| p.object2()).map(Value::from) else { return };
+    let index_of = |v: Value<'gc>, activation: &mut Activation<'_, 'gc>| {
+        game_v
+            .call_public_property(
+                AvmString::new_utf8(activation.gc(), "getChildIndex"),
+                super::function::FunctionArgs::from_slice(&[v]),
+                activation,
+            )
+            .ok()
+            .map(|i| num(i, activation))
+    };
+    let set_index = |v: Value<'gc>, i: f64, activation: &mut Activation<'_, 'gc>| {
+        let _ = game_v.call_public_property(
+            AvmString::new_utf8(activation.gc(), "setChildIndex"),
+            super::function::FunctionArgs::from_slice(&[v, Value::Number(i)]),
+            activation,
+        );
+    };
+    if !credits {
+        // Just above the level (the HUD layer is added after the level, so it stays on top).
+        for t in fresh_texts {
+            if let Some(li) = index_of(level, activation) {
+                set_index(t, li, activation);
+            }
+        }
+    } else {
+        // Back down to just below the credits text.
+        let lowest = fresh_texts
+            .iter()
+            .filter_map(|t| index_of(*t, activation))
+            .fold(f64::INFINITY, f64::min);
+        let li = index_of(level, activation).unwrap_or(f64::NAN);
+        if lowest.is_finite() {
+            for t in old_texts {
+                if index_of(t, activation).is_some_and(|i| i > li) {
+                    set_index(t, lowest, activation);
+                }
+            }
+        }
+    }
+}
+
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::EndText || f == WideFn::EndCredits {
+        center_end_text(f == WideFn::EndCredits, receiver, activation);
+        return;
+    }
     if f == WideFn::MapSkinMenuSwap {
         swap_map_skin_menu(receiver, activation);
         return;
