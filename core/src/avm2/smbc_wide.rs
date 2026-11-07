@@ -54,6 +54,10 @@ pub enum WideFn {
     /// the credits; the raised "Your quest is over" goes back below the
     /// credits' black bars so it scrolls away like the credits do.
     EndCredits,
+    /// `WaterHaze` constructor (post): the blue haze over water levels in the
+    /// SMB All-Stars style skins is clipped by a 512 px wide mask; widen it to
+    /// the stage.
+    WaterHazeCtor,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -75,6 +79,7 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.screens::InformativeBlackScreen/initiate()" => WideFn::BlackScreen,
         "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
         "com.smbc.level::LevelForeground/addScorePop()" => WideFn::AddScorePop,
+        "com.smbc.graphics::WaterHaze()" => WideFn::WaterHazeCtor,
         n if n.starts_with("com.smbc.managers::ScreenManager/")
             && (n.ends_with("displayThankYouText()")
                 || n.ends_with("addTxtTmrHandler()")) =>
@@ -190,6 +195,16 @@ pub fn call<'gc>(
             if std::env::var_os("SMBC_TEST_CHEATS").is_some() {
                 test_cheats(activation);
             }
+            if let Some(skin) = std::env::var("SMBC_TEST_SKIN").ok().and_then(|v| v.parse::<f64>().ok())
+                && receiver
+                    .as_object()
+                    .and_then(|o| o.as_display_object())
+                    .and_then(|d| d.parent())
+                    .and_then(|p| p.as_container())
+                    .is_some_and(|c| c.iter_render_list().any(|d| class_name(d) == "CharacterSelect"))
+            {
+                test_skin(skin, receiver, activation);
+            }
             let Some(this) = receiver.as_object().and_then(|o| o.as_display_object()) else {
                 return Hook::Pass;
             };
@@ -253,7 +268,7 @@ pub fn call<'gc>(
             }
             Hook::Pass
         }
-        WideFn::EndText | WideFn::EndCredits => Hook::Post,
+        WideFn::EndText | WideFn::EndCredits | WideFn::WaterHazeCtor => Hook::Post,
         WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap | WideFn::TrimBmp => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
@@ -340,6 +355,26 @@ fn swap_map_skin_menu<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_,
         }
         Err(e) => tracing::warn!("SMBC: SmbcMapSkinMenu failed: {e:?}"),
     }
+}
+
+/// Bench-only (`SMBC_TEST_SKIN=n`): map skin n, set at the character select.
+fn test_skin<'gc>(skin: f64, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let domain = receiver
+        .as_object()
+        .and_then(|o| o.instance_class().translation_unit())
+        .map(|t| t.domain())
+        .unwrap_or_else(|| activation.domain());
+    let Ok(gs) = domain.get_defined_value_handling_vector(activation, AvmString::new_utf8(activation.gc(), "com.smbc.data.GameSettings")) else {
+        return;
+    };
+    if get(gs, "mapSkin", activation).map(|v| num(v, activation)) == Some(skin) {
+        return;
+    }
+    let _ = gs.call_public_property(
+        AvmString::new_utf8(activation.gc(), "changeMapSkin"),
+        super::function::FunctionArgs::from_slice(&[Value::Number(skin)]),
+        activation,
+    );
 }
 
 /// Bench-only (`SMBC_TEST_CHEATS`): invincible, bouncy pits, infinite time.
@@ -468,6 +503,13 @@ fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Ac
 }
 
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::WaterHazeCtor {
+        if let Some(mask) = get(receiver, "mask", activation).filter(|v| v.as_object().is_some()) {
+            let w = stage_width(activation);
+            set(mask, "width", w, activation);
+        }
+        return;
+    }
     if f == WideFn::EndText || f == WideFn::EndCredits {
         center_end_text(f == WideFn::EndCredits, receiver, activation);
         return;
