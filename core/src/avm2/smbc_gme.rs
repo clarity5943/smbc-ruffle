@@ -93,7 +93,9 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 12] = [
+const WIDE: [WideFn; 14] = [
+    WideFn::RandomCharPick,
+    WideFn::ChooseCharacter,
     WideFn::WaterHazeCtor,
     WideFn::EndCredits,
     WideFn::EndText,

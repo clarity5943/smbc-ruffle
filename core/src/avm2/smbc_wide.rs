@@ -58,6 +58,13 @@ pub enum WideFn {
     /// SMB All-Stars style skins is clipped by a 512 px wide mask; widen it to
     /// the stage.
     WaterHazeCtor,
+    /// `CharacterSelectBox.getRandomCharInd()` (pre): the Random portrait was
+    /// chosen; remember it so the character's version is randomized too.
+    RandomCharPick,
+    /// `CharacterSelect.chooseCharacter()` (pre): after a Random pick, give
+    /// the player a random version (the game did this only for the special
+    /// button, so jump always gave each character's current version).
+    ChooseCharacter,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -80,6 +87,10 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "flash.utils::Dictionary()" => WideFn::DictionaryCtor,
         "com.smbc.level::LevelForeground/addScorePop()" => WideFn::AddScorePop,
         "com.smbc.graphics::WaterHaze()" => WideFn::WaterHazeCtor,
+        "com.smbc.level::CharacterSelect/chooseCharacter()" => WideFn::ChooseCharacter,
+        n if n.starts_with("com.smbc.messageBoxes::CharacterSelectBox/") && n.ends_with("getRandomCharInd()") => {
+            WideFn::RandomCharPick
+        }
         n if n.starts_with("com.smbc.managers::ScreenManager/")
             && (n.ends_with("displayThankYouText()")
                 || n.ends_with("addTxtTmrHandler()")) =>
@@ -180,6 +191,20 @@ pub fn call<'gc>(
     if f == WideFn::MapSkinMenuSwap {
         return Hook::Post;
     }
+    if f == WideFn::RandomCharPick {
+        // Only for a real character select (not the revive box or the
+        // options' character-disable screen).
+        let mode = get_any(receiver, "mode", activation).map(|v| v.coerce_to_string(activation).map(|s| s.to_utf8_lossy().into_owned()).unwrap_or_default());
+        let cs = get_any(receiver, "CS_SCRN", activation).is_some_and(|v| v.as_object().is_some());
+        RANDOM_PICK.with(|r| r.set(cs && mode.as_deref() == Some("characterSelect")));
+        return Hook::Pass;
+    }
+    if f == WideFn::ChooseCharacter {
+        if RANDOM_PICK.with(|r| r.replace(false)) && std::env::var_os("SMBC_NO_RANDOM_SKIN").is_none() {
+            random_char_skin(receiver, activation);
+        }
+        return Hook::Pass;
+    }
     if f == WideFn::TrimBmp {
         if std::env::var_os("SMBC_NO_TRIMFIX").is_none() {
             fix_trim_scale(args, activation);
@@ -269,7 +294,11 @@ pub fn call<'gc>(
             Hook::Pass
         }
         WideFn::EndText | WideFn::EndCredits | WideFn::WaterHazeCtor => Hook::Post,
-        WideFn::DictionaryCtor | WideFn::MapSkinMenuSwap | WideFn::TrimBmp => Hook::Pass,
+        WideFn::DictionaryCtor
+        | WideFn::MapSkinMenuSwap
+        | WideFn::TrimBmp
+        | WideFn::RandomCharPick
+        | WideFn::ChooseCharacter => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -413,6 +442,50 @@ fn test_cheats<'gc>(activation: &mut Activation<'_, 'gc>) {
     for k in ["invincible", "bouncyPits", "infiniteTime"] {
         let name = AvmString::new_utf8(activation.gc(), k);
         let _ = c.set_public_property(name, Value::Bool(true), activation);
+    }
+}
+
+thread_local! {
+    /// The Random portrait was just used to pick a character.
+    static RANDOM_PICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A property by local name in whatever namespace it was declared (private
+/// fields included).
+fn get_any<'gc>(obj: Value<'gc>, name: &str, activation: &mut Activation<'_, 'gc>) -> Option<Value<'gc>> {
+    let o = obj.as_object()?;
+    let ns = o
+        .vtable()
+        .resolved_traits()
+        .iter()
+        .find(|(n, _, _)| n.to_utf8_lossy() == name)
+        .map(|(_, ns, _)| ns)?;
+    let mn = super::Multiname::new(ns, AvmString::new_utf8(activation.gc(), name));
+    obj.get_property(&mn, activation).ok()
+}
+
+/// `GraphicsManager.INSTANCE.changeCharacterSkin(player, CHAR_SKIN_NUM_RANDOM)`.
+fn random_char_skin<'gc>(receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let Some(player) = get(receiver, "player", activation).filter(|v| v.as_object().is_some()) else { return };
+    let domain = receiver
+        .as_object()
+        .and_then(|o| o.instance_class().translation_unit())
+        .map(|t| t.domain())
+        .unwrap_or_else(|| activation.domain());
+    let Ok(gm_class) = domain.get_defined_value_handling_vector(activation, AvmString::new_utf8(activation.gc(), "com.smbc.managers.GraphicsManager")) else {
+        return;
+    };
+    let Some(gm) = get(gm_class, "INSTANCE", activation).filter(|v| v.as_object().is_some()) else { return };
+    let random = get(gm_class, "CHAR_SKIN_NUM_RANDOM", activation).unwrap_or(Value::Number(-2.0));
+    let _ = gm.call_public_property(
+        AvmString::new_utf8(activation.gc(), "changeCharacterSkin"),
+        super::function::FunctionArgs::from_slice(&[player, random]),
+        activation,
+    );
+    if std::env::var_os("SMBC_WIDE_DEBUG").is_some() {
+        let c = get(player, "charNum", activation).map(|v| num(v, activation));
+        let skin = get(player, "currentBmdSkin", activation).and_then(|v| v.as_object().map(|_| v)).and_then(|v| get(v, "skinNum", activation)).map(|v| num(v, activation));
+        eprintln!("[random] char {c:?} skin {skin:?}");
     }
 }
 
