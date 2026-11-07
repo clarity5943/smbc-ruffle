@@ -17,6 +17,8 @@ mod avm1;
 mod avm2;
 #[cfg(feature = "smbc_profile")]
 pub use avm2::{profile_dump, profile_reset};
+#[cfg(feature = "smbc_gme")]
+pub use avm2::smbc_wide::set_save_paths as smbc_set_save_paths;
 /// SMBC diagnostics: number of GPU -> CPU bitmap readbacks (each one stalls until the GPU catches up).
 /// SMBC diagnostics: current length of the AVM2 orphan list.
 pub static SMBC_ORPHANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

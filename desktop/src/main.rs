@@ -165,6 +165,9 @@ fn main() -> Result<(), Error> {
         }
         Err(err) => err.exit(),
     };
+    if smbc::is_bundle() {
+        smbc::init_save_slots();
+    }
 
     #[cfg(feature = "shell-completions")]
     if let Some(shell) = opt.completions {

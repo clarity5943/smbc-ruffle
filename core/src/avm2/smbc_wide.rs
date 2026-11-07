@@ -65,6 +65,18 @@ pub enum WideFn {
     /// the player a random version (the game did this only for the special
     /// button, so jump always gave each character's current version).
     ChooseCharacter,
+    /// `SmbcSaves.nativeRead(slot)` (replace): the slot file's text or null.
+    SaveRead,
+    /// `SmbcSaves.nativeWrite(slot, data)` (replace): write the slot file.
+    SaveWrite,
+    /// `SmbcSaves.nativeSetFileData(fileRef, data)` (replace): make the
+    /// FileReference hold `data` as if a file had been picked.
+    SaveSetFileData,
+    /// `SmbcSaves.nativeClearFileRef()` (replace): `StatManager._fileRef = null`
+    /// without the save handler's `relBtns()`.
+    SaveClearFileRef,
+    /// `StatManager.saveStartLevelStats()` (post): autosave.
+    LevelStartStats,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -88,6 +100,13 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.level::LevelForeground/addScorePop()" => WideFn::AddScorePop,
         "com.smbc.graphics::WaterHaze()" => WideFn::WaterHazeCtor,
         "com.smbc.level::CharacterSelect/chooseCharacter()" => WideFn::ChooseCharacter,
+        "com.smbc.messageBoxes::SmbcSaves$/nativeRead()" => WideFn::SaveRead,
+        "com.smbc.messageBoxes::SmbcSaves$/nativeWrite()" => WideFn::SaveWrite,
+        "com.smbc.messageBoxes::SmbcSaves$/nativeSetFileData()" => WideFn::SaveSetFileData,
+        "com.smbc.messageBoxes::SmbcSaves$/nativeClearFileRef()" => WideFn::SaveClearFileRef,
+        n if n.starts_with("com.smbc.managers::StatManager/") && n.ends_with("saveStartLevelStats()") => {
+            WideFn::LevelStartStats
+        }
         n if n.starts_with("com.smbc.messageBoxes::CharacterSelectBox/") && n.ends_with("getRandomCharInd()") => {
             WideFn::RandomCharPick
         }
@@ -190,6 +209,13 @@ pub fn call<'gc>(
     }
     if f == WideFn::MapSkinMenuSwap {
         return Hook::Post;
+    }
+    match f {
+        WideFn::SaveRead | WideFn::SaveWrite | WideFn::SaveSetFileData | WideFn::SaveClearFileRef => {
+            return Hook::Replace(save_native(f, args, activation));
+        }
+        WideFn::LevelStartStats => return Hook::Post,
+        _ => {}
     }
     if f == WideFn::RandomCharPick {
         // Only for a real character select (not the revive box or the
@@ -298,7 +324,12 @@ pub fn call<'gc>(
         | WideFn::MapSkinMenuSwap
         | WideFn::TrimBmp
         | WideFn::RandomCharPick
-        | WideFn::ChooseCharacter => Hook::Pass,
+        | WideFn::ChooseCharacter
+        | WideFn::SaveRead
+        | WideFn::SaveWrite
+        | WideFn::SaveSetFileData
+        | WideFn::SaveClearFileRef
+        | WideFn::LevelStartStats => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -601,6 +632,18 @@ fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Ac
 }
 
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::LevelStartStats {
+        if let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcSaves")
+            && let Err(e) = c.call_public_property(
+                AvmString::new_utf8(activation.gc(), "autosave"),
+                super::function::FunctionArgs::empty(),
+                activation,
+            )
+        {
+            tracing::warn!("SMBC autosave failed: {e:?}");
+        }
+        return;
+    }
     if f == WideFn::BlackScreen {
         hide_end_text(receiver, activation);
         return;
@@ -641,3 +684,200 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// In-game save slots. The game's own save code is kept: `FileReference.save`
+// and `browse` (file_reference.rs) call `SmbcSaves.requestSave/requestLoad`
+// (AS3, added to the SWF) instead of opening system dialogs, and its slot
+// menu reads/writes plain text files (the game's save format) here.
+
+/// Slot 0 is the autosave; 1..=5 are the player's slots.
+const SAVE_SLOT_MAX: i32 = 5;
+
+static SAVE_PATHS: std::sync::OnceLock<(std::path::PathBuf, Option<std::path::PathBuf>)> =
+    std::sync::OnceLock::new();
+
+/// Set by the desktop bundle: the slot directory, and an old
+/// `smbc_save_data.txt` to bring into slot 1 the first time.
+pub fn set_save_paths(dir: std::path::PathBuf, import: Option<std::path::PathBuf>) {
+    let _ = SAVE_PATHS.set((dir, import));
+}
+
+fn slot_dir() -> std::path::PathBuf {
+    SAVE_PATHS
+        .get()
+        .map(|p| p.0.clone())
+        .or_else(|| std::env::var_os("SMBC_SAVE_SLOTS_DIR").map(Into::into))
+        .unwrap_or_else(|| std::env::temp_dir().join("smbc_save_slots"))
+}
+
+fn slot_path(slot: i32) -> std::path::PathBuf {
+    slot_dir().join(if slot == 0 { "autosave.txt".to_string() } else { format!("slot{slot}.txt") })
+}
+
+fn import_old_save() {
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| {
+        let dir = slot_dir();
+        let marker = dir.join(".imported");
+        if marker.exists() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let import = SAVE_PATHS
+            .get()
+            .and_then(|p| p.1.clone())
+            .or_else(|| std::env::var_os("SMBC_IMPORT_SAVE").map(Into::into));
+        if let Some(src) = import
+            && src.is_file()
+            && !slot_path(1).exists()
+        {
+            // Contents only: a copy would keep a read-only attribute.
+            match std::fs::read(&src).and_then(|d| std::fs::write(slot_path(1), d)) {
+                Ok(()) => tracing::info!("SMBC: imported {} into save slot 1", src.display()),
+                Err(e) => tracing::warn!("SMBC: couldn't import {}: {e}", src.display()),
+            }
+        }
+        let _ = std::fs::write(marker, b"");
+    });
+}
+
+fn slot_read(slot: i32) -> Option<String> {
+    if !(0..=SAVE_SLOT_MAX).contains(&slot) {
+        return None;
+    }
+    import_old_save();
+    let bytes = std::fs::read(slot_path(slot)).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn slot_write(slot: i32, data: &str) -> bool {
+    if !(0..=SAVE_SLOT_MAX).contains(&slot) {
+        return false;
+    }
+    import_old_save();
+    let path = slot_path(slot);
+    let tmp = path.with_extension("tmp");
+    let ok = std::fs::create_dir_all(slot_dir()).is_ok()
+        && std::fs::write(&tmp, data.as_bytes()).is_ok()
+        && std::fs::rename(&tmp, &path).is_ok();
+    if !ok {
+        tracing::warn!("SMBC: couldn't write {}", path.display());
+    }
+    ok
+}
+
+/// A FileReference "selection" held in memory.
+struct MemFile(Vec<u8>);
+
+impl crate::backend::ui::FileDialogSelection for MemFile {
+    fn creation_time(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+    fn modification_time(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+    fn file_name(&self) -> String {
+        "smbc_save_data.txt".into()
+    }
+    fn size(&self) -> Option<u64> {
+        Some(self.0.len() as u64)
+    }
+    fn file_type(&self) -> Option<String> {
+        Some(".txt".into())
+    }
+    fn contents(&self) -> &[u8] {
+        &self.0
+    }
+    fn write_and_refresh(&mut self, data: &[u8]) {
+        self.0 = data.to_vec();
+    }
+}
+
+fn save_native<'gc>(
+    f: WideFn,
+    args: super::function::FunctionArgs<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    let a = args.to_slice();
+    let arg = |i: usize| a.get(i).copied().unwrap_or(Value::Undefined);
+    match f {
+        WideFn::SaveRead => {
+            let slot = arg(0).coerce_to_i32(activation)?;
+            Ok(slot_read(slot).map_or(Value::Null, |s| AvmString::new_utf8(activation.gc(), s).into()))
+        }
+        WideFn::SaveWrite => {
+            let slot = arg(0).coerce_to_i32(activation)?;
+            let data = arg(1).coerce_to_string(activation)?.to_utf8_lossy().into_owned();
+            Ok(slot_write(slot, &data).into())
+        }
+        WideFn::SaveSetFileData => {
+            let data = arg(1).coerce_to_string(activation)?.to_utf8_lossy().into_owned();
+            if let Some(fr) = arg(0).as_object().and_then(|o| o.as_file_reference()) {
+                fr.init_from_file_selection(Box::new(MemFile(data.into_bytes())));
+                fr.set_loaded(false);
+            }
+            Ok(Value::Undefined)
+        }
+        WideFn::SaveClearFileRef => {
+            if let Some(sm) = game_class(activation, "com.smbc.managers.StatManager")
+                .and_then(|c| get(c, "STAT_MNGR", activation))
+                .filter(|v| v.as_object().is_some())
+            {
+                set_any(sm, "_fileRef", Value::Null, activation);
+            }
+            Ok(Value::Undefined)
+        }
+        _ => Ok(Value::Undefined),
+    }
+}
+
+/// A class defined by the game SWF (looked up in the root movie's domain, so
+/// it works from natives and event handlers too).
+fn game_class<'gc>(activation: &mut Activation<'_, 'gc>, name: &str) -> Option<Value<'gc>> {
+    let movie = *activation.context.root_swf;
+    let domain = activation.context.library.library_for_movie(movie)?.try_avm2_domain()?;
+    domain
+        .get_defined_value_handling_vector(activation, AvmString::new_utf8(activation.gc(), name))
+        .ok()
+}
+
+/// Set a property in whatever namespace it was declared (private included).
+fn set_any<'gc>(obj: Value<'gc>, name: &str, v: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+    let Some(o) = obj.as_object() else { return };
+    let Some(ns) = o
+        .vtable()
+        .resolved_traits()
+        .iter()
+        .find(|(n, _, _)| n.to_utf8_lossy() == name)
+        .map(|(_, ns, _)| ns)
+    else {
+        return;
+    };
+    let mn = super::Multiname::new(ns, AvmString::new_utf8(activation.gc(), name));
+    let _ = obj.set_property(&mn, v, activation);
+}
+
+/// Called by `FileReference.browse` (`data == None`) and `save`: hand the
+/// request to the game's `SmbcSaves` instead of a system dialog. Returns
+/// false when the SWF has no `SmbcSaves` (any other movie).
+pub fn save_redirect<'gc>(activation: &mut Activation<'_, 'gc>, file_ref: Value<'gc>, data: Option<&[u8]>) -> bool {
+    let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcSaves") else {
+        return false;
+    };
+    let (method, args) = match data {
+        None => ("requestLoad", vec![file_ref]),
+        Some(d) => (
+            "requestSave",
+            vec![file_ref, AvmString::new_utf8(activation.gc(), String::from_utf8_lossy(d)).into()],
+        ),
+    };
+    if let Err(e) = c.call_public_property(
+        AvmString::new_utf8(activation.gc(), method),
+        super::function::FunctionArgs::from_slice(&args),
+        activation,
+    ) {
+        tracing::warn!("SMBC SmbcSaves.{method} failed: {e:?}");
+    }
+    true
+}

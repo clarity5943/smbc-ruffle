@@ -140,6 +140,11 @@ pub fn browse<'gc>(
     this: Value<'gc>,
     args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
+    #[cfg(feature = "smbc_gme")]
+    if crate::avm2::smbc_wide::save_redirect(activation, this, None) {
+        return Ok(true.into());
+    }
+
     let this = this.as_object().unwrap();
 
     let this = this.as_file_reference().unwrap();
@@ -264,6 +269,11 @@ pub fn save_internal<'gc>(
     let file_name = args
         .try_get_string(1)
         .expect("AS code ensures defaultFileName is non-null");
+
+    #[cfg(feature = "smbc_gme")]
+    if crate::avm2::smbc_wide::save_redirect(activation, this.into(), Some(&data)) {
+        return Ok(Value::Undefined);
+    }
 
     // Create and spawn dialog
     let dialog = activation.context.ui.display_file_save_dialog(

@@ -23,6 +23,15 @@ pub fn bundled_swf() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// In-game save slots live in `<data>/saves/slots`; the first time, an old
+/// `smbc_save_data.txt` next to the exe goes into slot 1.
+pub fn init_save_slots() {
+    ruffle_core::smbc_set_save_paths(
+        data_dir().join("saves").join("slots"),
+        exe_dir().map(|d| d.join("smbc_save_data.txt")),
+    );
+}
+
 pub fn is_bundle() -> bool {
     bundled_swf().is_some()
 }
