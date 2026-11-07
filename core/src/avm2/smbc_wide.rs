@@ -697,8 +697,9 @@ const SAVE_SLOT_MAX: i32 = 5;
 static SAVE_PATHS: std::sync::OnceLock<(std::path::PathBuf, Option<std::path::PathBuf>)> =
     std::sync::OnceLock::new();
 
-/// Set by the desktop bundle: the slot directory, and an old
-/// `smbc_save_data.txt` to bring into slot 1 the first time.
+/// Set by the desktop bundle: the slot directory, and where to find old
+/// `smbc_save_data*.txt` files to bring into slots 1-5 the first time (a
+/// file or a folder).
 pub fn set_save_paths(dir: std::path::PathBuf, import: Option<std::path::PathBuf>) {
     let _ = SAVE_PATHS.set((dir, import));
 }
@@ -724,17 +725,52 @@ fn import_old_save() {
             return;
         }
         let _ = std::fs::create_dir_all(&dir);
+        // A file, or a folder holding smbc_save_data*.txt (the game's own
+        // save files, e.g. next to the exe).
         let import = SAVE_PATHS
             .get()
             .and_then(|p| p.1.clone())
             .or_else(|| std::env::var_os("SMBC_IMPORT_SAVE").map(Into::into));
-        if let Some(src) = import
-            && src.is_file()
-            && !slot_path(1).exists()
-        {
-            // Contents only: a copy would keep a read-only attribute.
-            match std::fs::read(&src).and_then(|d| std::fs::write(slot_path(1), d)) {
-                Ok(()) => tracing::info!("SMBC: imported {} into save slot 1", src.display()),
+        let mut files: Vec<std::path::PathBuf> = match import {
+            Some(p) if p.is_file() => vec![p],
+            Some(p) if p.is_dir() => std::fs::read_dir(&p)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|f| {
+                            f.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                                let n = n.to_ascii_lowercase();
+                                n.starts_with("smbc_save_data") && n.ends_with(".txt")
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        files.sort();
+        let mut slot = 1;
+        for src in files {
+            while slot <= SAVE_SLOT_MAX && slot_path(slot).exists() {
+                slot += 1;
+            }
+            if slot > SAVE_SLOT_MAX {
+                break;
+            }
+            let Ok(data) = std::fs::read(&src) else { continue };
+            if !String::from_utf8_lossy(&data).contains("<smbc_save_data>") {
+                continue;
+            }
+            // Contents only (a copy would keep a read-only attribute), with the
+            // file's date as the save time.
+            let mut out = Vec::new();
+            if let Ok(t) = std::fs::metadata(&src).and_then(|m| m.modified())
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                out.extend_from_slice(format!("#smbc-slot {}\n", d.as_millis()).as_bytes());
+            }
+            out.extend_from_slice(&data);
+            match std::fs::write(slot_path(slot), out) {
+                Ok(()) => tracing::info!("SMBC: imported {} into save slot {slot}", src.display()),
                 Err(e) => tracing::warn!("SMBC: couldn't import {}: {e}", src.display()),
             }
         }
