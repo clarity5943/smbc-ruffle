@@ -89,6 +89,17 @@ pub enum WideFn {
     CheatsLoaded,
     /// `TitleLevel` constructor (post): apply global settings at startup.
     TitleCtor,
+    /// `GameSettings.setTitleMapSkin()` (post): use the player's chosen map
+    /// skin instead of the random title one.
+    TitleMapSkin,
+    /// `GameSettings.changeMapSkin()` (post): the player chose a map skin
+    /// (ignored while a save's settings are being loaded).
+    MapSkinChanged,
+    /// `GameSettings.loadData()` (pre and post): a save's settings are loading.
+    GsLoadData,
+    /// `SmbcGlobal.nativeSetMapSkin(n)` (replace): `GameSettings._mapSkin = n`
+    /// without redrawing (before the title screen is built).
+    SetMapSkin,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -117,6 +128,10 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.data::Cheats$/unlockCheat()" | "com.smbc.data::Cheats$/unlockAllCheats()" => WideFn::CheatUnlock,
         "com.smbc.data::Cheats$/loadData()" => WideFn::CheatsLoaded,
         "com.smbc.level::TitleLevel()" => WideFn::TitleCtor,
+        "com.smbc.data::GameSettings$/setTitleMapSkin()" => WideFn::TitleMapSkin,
+        "com.smbc.data::GameSettings$/changeMapSkin()" => WideFn::MapSkinChanged,
+        "com.smbc.data::GameSettings$/loadData()" => WideFn::GsLoadData,
+        "com.smbc.messageBoxes::SmbcGlobal$/nativeSetMapSkin()" => WideFn::SetMapSkin,
         n if n.starts_with("com.smbc.messageBoxes::GraphicsOptions/") && n.ends_with("loadItems()") => {
             WideFn::GraphicsLoadItems
         }
@@ -233,12 +248,25 @@ pub fn call<'gc>(
         WideFn::SaveRead | WideFn::SaveWrite | WideFn::SaveSetFileData | WideFn::SaveClearFileRef => {
             return Hook::Replace(save_native(f, args, activation));
         }
+        WideFn::GsLoadData => {
+            LOADING_SAVE_SETTINGS.with(|l| l.set(true));
+            return Hook::Post;
+        }
+        WideFn::SetMapSkin => {
+            let v = args.to_slice().first().copied().unwrap_or(Value::Undefined);
+            if let Some(gs) = game_class(activation, "com.smbc.data.GameSettings") {
+                set_any(gs, "_mapSkin", v, activation);
+            }
+            return Hook::Replace(Ok(Value::Undefined));
+        }
         WideFn::LevelStartStats
         | WideFn::GraphicsLoadItems
         | WideFn::MsgBoxDestroy
         | WideFn::CheatUnlock
         | WideFn::CheatsLoaded
-        | WideFn::TitleCtor => return Hook::Post,
+        | WideFn::TitleCtor
+        | WideFn::TitleMapSkin
+        | WideFn::MapSkinChanged => return Hook::Post,
         _ => {}
     }
     if f == WideFn::RandomCharPick {
@@ -358,7 +386,11 @@ pub fn call<'gc>(
         | WideFn::MsgBoxDestroy
         | WideFn::CheatUnlock
         | WideFn::CheatsLoaded
-        | WideFn::TitleCtor => Hook::Pass,
+        | WideFn::TitleCtor
+        | WideFn::TitleMapSkin
+        | WideFn::MapSkinChanged
+        | WideFn::GsLoadData
+        | WideFn::SetMapSkin => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -503,6 +535,11 @@ fn test_cheats<'gc>(activation: &mut Activation<'_, 'gc>) {
         let name = AvmString::new_utf8(activation.gc(), k);
         let _ = c.set_public_property(name, Value::Bool(true), activation);
     }
+}
+
+thread_local! {
+    /// Inside `GameSettings.loadData` (a save's settings are being loaded).
+    static LOADING_SAVE_SETTINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -661,10 +698,17 @@ fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Ac
 }
 
 pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activation: &mut Activation<'_, 'gc>) {
+    if f == WideFn::GsLoadData {
+        LOADING_SAVE_SETTINGS.with(|l| l.set(false));
+        return;
+    }
     let global = match f {
         WideFn::MsgBoxDestroy | WideFn::CheatUnlock => Some("save"),
         WideFn::CheatsLoaded => Some("afterSaveLoaded"),
         WideFn::TitleCtor => Some("startup"),
+        WideFn::TitleMapSkin => Some("titleMapSkin"),
+        WideFn::MapSkinChanged if !LOADING_SAVE_SETTINGS.with(|l| l.get()) => Some("mapSkinChosen"),
+        WideFn::MapSkinChanged => return,
         _ => None,
     };
     if let Some(method) = global {
