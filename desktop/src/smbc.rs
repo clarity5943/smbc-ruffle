@@ -32,6 +32,22 @@ pub fn init_save_slots() {
     );
 }
 
+fn fullscreen_file() -> PathBuf {
+    data_dir().join("fullscreen.txt")
+}
+
+fn remembered_fullscreen() -> bool {
+    std::fs::read_to_string(fullscreen_file()).is_ok_and(|s| s.trim() == "1")
+}
+
+/// Called whenever the window enters or leaves fullscreen (F11, Alt+Enter,
+/// Esc or the game's Full Screen Mode option), so the next launch matches.
+pub fn remember_fullscreen(on: bool) {
+    if is_bundle() {
+        let _ = std::fs::write(fullscreen_file(), if on { "1" } else { "0" });
+    }
+}
+
 pub fn is_bundle() -> bool {
     bundled_swf().is_some()
 }
@@ -148,6 +164,10 @@ pub fn build_args() -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![exe];
     let mut push = |s: String| args.push(OsString::from(s));
 
+    // Fullscreen as the player last left it (remember_fullscreen).
+    if !has(&["--fullscreen"]) && remembered_fullscreen() {
+        push("--fullscreen".into());
+    }
     if !has(&["--show-gui"]) {
         push("--no-gui".into());
     }

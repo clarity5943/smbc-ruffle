@@ -77,6 +77,18 @@ pub enum WideFn {
     SaveClearFileRef,
     /// `StatManager.saveStartLevelStats()` (post): autosave.
     LevelStartStats,
+    /// `GraphicsOptions.loadItems()` (post): drop "Random Map Skin" (it is
+    /// chosen in the map skin menu now).
+    GraphicsLoadItems,
+    /// `MessageBox.destroy()` (post): a menu closed; save global settings.
+    MsgBoxDestroy,
+    /// `Cheats.unlockCheat()` / `unlockAllCheats()` (post): save global settings.
+    CheatUnlock,
+    /// `Cheats.loadData()` (post): a save was loaded; put the global settings
+    /// back and merge its cheat unlocks into them.
+    CheatsLoaded,
+    /// `TitleLevel` constructor (post): apply global settings at startup.
+    TitleCtor,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -101,6 +113,13 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.graphics::WaterHaze()" => WideFn::WaterHazeCtor,
         "com.smbc.level::CharacterSelect/chooseCharacter()" => WideFn::ChooseCharacter,
         "com.smbc.messageBoxes::SmbcSaves$/nativeRead()" => WideFn::SaveRead,
+        "com.smbc.messageBoxes::MessageBox/destroy()" => WideFn::MsgBoxDestroy,
+        "com.smbc.data::Cheats$/unlockCheat()" | "com.smbc.data::Cheats$/unlockAllCheats()" => WideFn::CheatUnlock,
+        "com.smbc.data::Cheats$/loadData()" => WideFn::CheatsLoaded,
+        "com.smbc.level::TitleLevel()" => WideFn::TitleCtor,
+        n if n.starts_with("com.smbc.messageBoxes::GraphicsOptions/") && n.ends_with("loadItems()") => {
+            WideFn::GraphicsLoadItems
+        }
         "com.smbc.messageBoxes::SmbcSaves$/nativeWrite()" => WideFn::SaveWrite,
         "com.smbc.messageBoxes::SmbcSaves$/nativeSetFileData()" => WideFn::SaveSetFileData,
         "com.smbc.messageBoxes::SmbcSaves$/nativeClearFileRef()" => WideFn::SaveClearFileRef,
@@ -214,7 +233,12 @@ pub fn call<'gc>(
         WideFn::SaveRead | WideFn::SaveWrite | WideFn::SaveSetFileData | WideFn::SaveClearFileRef => {
             return Hook::Replace(save_native(f, args, activation));
         }
-        WideFn::LevelStartStats => return Hook::Post,
+        WideFn::LevelStartStats
+        | WideFn::GraphicsLoadItems
+        | WideFn::MsgBoxDestroy
+        | WideFn::CheatUnlock
+        | WideFn::CheatsLoaded
+        | WideFn::TitleCtor => return Hook::Post,
         _ => {}
     }
     if f == WideFn::RandomCharPick {
@@ -329,7 +353,12 @@ pub fn call<'gc>(
         | WideFn::SaveWrite
         | WideFn::SaveSetFileData
         | WideFn::SaveClearFileRef
-        | WideFn::LevelStartStats => Hook::Pass,
+        | WideFn::LevelStartStats
+        | WideFn::GraphicsLoadItems
+        | WideFn::MsgBoxDestroy
+        | WideFn::CheatUnlock
+        | WideFn::CheatsLoaded
+        | WideFn::TitleCtor => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -631,7 +660,29 @@ fn center_end_text<'gc>(credits: bool, receiver: Value<'gc>, activation: &mut Ac
     }
 }
 
-pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, activation: &mut Activation<'_, 'gc>) {
+pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activation: &mut Activation<'_, 'gc>) {
+    let global = match f {
+        WideFn::MsgBoxDestroy | WideFn::CheatUnlock => Some("save"),
+        WideFn::CheatsLoaded => Some("afterSaveLoaded"),
+        WideFn::TitleCtor => Some("startup"),
+        _ => None,
+    };
+    if let Some(method) = global {
+        if let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcGlobal")
+            && let Err(e) = c.call_public_property(
+                AvmString::new_utf8(activation.gc(), method),
+                super::function::FunctionArgs::empty(),
+                activation,
+            )
+        {
+            tracing::warn!("SMBC SmbcGlobal.{method} failed: {e:?}");
+        }
+        return;
+    }
+    if f == WideFn::GraphicsLoadItems {
+        remove_menu_item(ret, "Random Map Skin", activation);
+        return;
+    }
     if f == WideFn::LevelStartStats {
         if let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcSaves")
             && let Err(e) = c.call_public_property(
@@ -712,8 +763,15 @@ fn slot_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("smbc_save_slots"))
 }
 
+/// `nativeRead/nativeWrite` slot number of the global settings file.
+const GLOBAL_SETTINGS_SLOT: i32 = 100;
+
 fn slot_path(slot: i32) -> std::path::PathBuf {
-    slot_dir().join(if slot == 0 { "autosave.txt".to_string() } else { format!("slot{slot}.txt") })
+    slot_dir().join(match slot {
+        0 => "autosave.txt".to_string(),
+        GLOBAL_SETTINGS_SLOT => "settings.txt".to_string(),
+        n => format!("slot{n}.txt"),
+    })
 }
 
 fn import_old_save() {
@@ -779,7 +837,7 @@ fn import_old_save() {
 }
 
 fn slot_read(slot: i32) -> Option<String> {
-    if !(0..=SAVE_SLOT_MAX).contains(&slot) {
+    if !(0..=SAVE_SLOT_MAX).contains(&slot) && slot != GLOBAL_SETTINGS_SLOT {
         return None;
     }
     import_old_save();
@@ -788,7 +846,7 @@ fn slot_read(slot: i32) -> Option<String> {
 }
 
 fn slot_write(slot: i32, data: &str) -> bool {
-    if !(0..=SAVE_SLOT_MAX).contains(&slot) {
+    if !(0..=SAVE_SLOT_MAX).contains(&slot) && slot != GLOBAL_SETTINGS_SLOT {
         return false;
     }
     import_old_save();
@@ -865,6 +923,29 @@ fn save_native<'gc>(
             Ok(Value::Undefined)
         }
         _ => Ok(Value::Undefined),
+    }
+}
+
+/// Remove the `[name, ...]` entry from a menu's item array.
+fn remove_menu_item<'gc>(items: Option<Value<'gc>>, name: &str, activation: &mut Activation<'_, 'gc>) {
+    let Some(items) = items.filter(|v| v.as_object().is_some()) else { return };
+    let len = get(items, "length", activation).map(|v| num(v, activation)).unwrap_or(0.0) as usize;
+    for i in 0..len {
+        let key = AvmString::new_utf8(activation.gc(), i.to_string());
+        let Ok(item) = items.get_public_property(key, activation) else { continue };
+        let first = item
+            .as_object()
+            .and_then(|_| item.get_public_property(AvmString::new_utf8(activation.gc(), "0"), activation).ok())
+            .and_then(|v| v.coerce_to_string(activation).ok())
+            .map(|s| s.to_utf8_lossy().into_owned());
+        if first.as_deref() == Some(name) {
+            let _ = items.call_public_property(
+                AvmString::new_utf8(activation.gc(), "splice"),
+                super::function::FunctionArgs::from_slice(&[Value::Number(i as f64), Value::Number(1.0)]),
+                activation,
+            );
+            return;
+        }
     }
 }
 

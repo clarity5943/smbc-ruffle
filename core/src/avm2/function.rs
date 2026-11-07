@@ -400,7 +400,7 @@ pub fn exec<'gc>(
     if let Some(w) = smbc_post
         && ret.is_ok()
     {
-        super::smbc_wide::post(w, receiver, activation);
+        super::smbc_wide::post(w, receiver, ret.as_ref().ok().copied(), activation);
     }
     ret
 }

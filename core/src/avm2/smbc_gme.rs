@@ -93,7 +93,12 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 19] = [
+const WIDE: [WideFn; 24] = [
+    WideFn::GraphicsLoadItems,
+    WideFn::MsgBoxDestroy,
+    WideFn::CheatUnlock,
+    WideFn::CheatsLoaded,
+    WideFn::TitleCtor,
     WideFn::SaveRead,
     WideFn::SaveWrite,
     WideFn::SaveSetFileData,

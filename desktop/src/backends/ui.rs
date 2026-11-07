@@ -245,6 +245,7 @@ impl UiBackend for DesktopUiBackend {
     }
 
     fn set_fullscreen(&mut self, is_full: bool) -> Result<(), FullscreenError> {
+        crate::smbc::remember_fullscreen(is_full);
         self.window.set_fullscreen(if is_full {
             Some(Fullscreen::Borderless(None))
         } else {
