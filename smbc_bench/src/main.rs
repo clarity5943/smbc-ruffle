@@ -95,6 +95,7 @@ fn main() {
                         "down" => (PhysicalKey::ArrowDown, LogicalKey::Named(NamedKey::ArrowDown)),
                         "a" => (PhysicalKey::KeyA, LogicalKey::Character('a')),
                         "c" => (PhysicalKey::KeyC, LogicalKey::Character('c')),
+                        "backspace" => (PhysicalKey::Backspace, LogicalKey::Named(NamedKey::Backspace)),
                         _ => panic!("key {key}"),
                     };
                     let k = KeyDescriptor { physical_key: pk, logical_key: lk, key_location: KeyLocation::Standard };
