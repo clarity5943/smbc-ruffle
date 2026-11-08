@@ -254,23 +254,7 @@ fn write_default_options(data: &std::path::Path) {
 #--width=1536
 #--height=1440
 #
-# Controller mapping. If ANY --gamepad-button line is active, the built-in
-# mapping is replaced, so list every button you want.
-# Buttons: south (A/Cross), east (B/Circle), west (X/Square), north (Y/Triangle),
-#          left-trigger (LB), right-trigger (RB), left-trigger2 (LT),
-#          right-trigger2 (RT), select (Back), start, d-pad-up/down/left/right
-# Keys must match the game's own Options > Controls (defaults shown).
-#--gamepad-button=south=z
-#--gamepad-button=west=x
-#--gamepad-button=north=x
-#--gamepad-button=east=c
-#--gamepad-button=right-trigger=c
-#--gamepad-button=start=return
-#--gamepad-button=select=a
-#--gamepad-button=d-pad-up=up
-#--gamepad-button=d-pad-down=down
-#--gamepad-button=d-pad-left=left
-#--gamepad-button=d-pad-right=right
+# Controller buttons are set in the game: Options > Controller.
 #
 # Graphics backend (if you have rendering problems): vulkan, dx12, gl
 #--graphics=dx12

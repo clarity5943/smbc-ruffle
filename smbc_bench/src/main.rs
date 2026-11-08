@@ -78,6 +78,13 @@ fn main() {
                     let fr: u64 = parts.next().unwrap().parse().unwrap();
                     let key = parts.next().unwrap();
                     let dur: u64 = parts.next().map(|d| d.parse().unwrap()).unwrap_or(6);
+                    if let Some(name) = key.strip_prefix("pad-") {
+                        use std::str::FromStr;
+                        let button = ruffle_core::events::GamepadButton::from_str(name).ok().expect("pad button");
+                        if f == fr { p.handle_event(PlayerEvent::GamepadButtonDown { button }); println!("[{:7.2}s] pad {name}", start.elapsed().as_secs_f64()); }
+                        if f == fr + dur { p.handle_event(PlayerEvent::GamepadButtonUp { button }); }
+                        continue;
+                    }
                     let (pk, lk) = match key {
                         "enter" => (PhysicalKey::Enter, LogicalKey::Named(NamedKey::Enter)),
                         "z" => (PhysicalKey::KeyZ, LogicalKey::Character('z')),

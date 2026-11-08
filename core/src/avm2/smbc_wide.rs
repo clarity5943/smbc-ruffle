@@ -15,7 +15,8 @@
 //!
 //! Nothing here does anything for the original 512 px wide movie.
 
-use super::object::TObject;
+use super::object::{ArrayObject, TObject};
+use super::array::ArrayStorage;
 use super::{Activation, Error, Value};
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
 use crate::string::AvmString;
@@ -100,6 +101,16 @@ pub enum WideFn {
     /// `SmbcGlobal.nativeSetMapSkin(n)` (replace): `GameSettings._mapSkin = n`
     /// without redrawing (before the title screen is built).
     SetMapSkin,
+    /// `OptionsMenu.loadItems()` (post): add "Controller" after "Set Buttons".
+    OptionsLoadItems,
+    /// `OptionsMenu.chooseItem()` (pre): "Controller" opens SmbcPadMenu.
+    OptionsChoose,
+    /// `SmbcPad.nativeSetKeys(keys)` (replace): the key each pad button sends.
+    PadSetKeys,
+    /// `SmbcPad.nativeCapture(on)` (replace): record pad presses instead.
+    PadCapture,
+    /// `SmbcPad.nativePoll()` (replace): the button pressed while capturing, or -1.
+    PadPoll,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -132,6 +143,13 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.data::GameSettings$/changeMapSkin()" => WideFn::MapSkinChanged,
         "com.smbc.data::GameSettings$/loadData()" => WideFn::GsLoadData,
         "com.smbc.messageBoxes::SmbcGlobal$/nativeSetMapSkin()" => WideFn::SetMapSkin,
+        "com.smbc.messageBoxes::SmbcPad$/nativeSetKeys()" => WideFn::PadSetKeys,
+        "com.smbc.messageBoxes::SmbcPad$/nativeCapture()" => WideFn::PadCapture,
+        "com.smbc.messageBoxes::SmbcPad$/nativePoll()" => WideFn::PadPoll,
+        "com.smbc.messageBoxes::OptionsMenu/chooseItem()" => WideFn::OptionsChoose,
+        n if n.starts_with("com.smbc.messageBoxes::OptionsMenu/") && n.ends_with("loadItems()") => {
+            WideFn::OptionsLoadItems
+        }
         n if n.starts_with("com.smbc.messageBoxes::GraphicsOptions/") && n.ends_with("loadItems()") => {
             WideFn::GraphicsLoadItems
         }
@@ -252,6 +270,23 @@ pub fn call<'gc>(
             LOADING_SAVE_SETTINGS.with(|l| l.set(true));
             return Hook::Post;
         }
+        WideFn::PadSetKeys | WideFn::PadCapture | WideFn::PadPoll => {
+            return Hook::Replace(pad_native(f, args, activation));
+        }
+        WideFn::OptionsChoose => {
+            let name = args.to_slice().first().copied().and_then(|v| v.coerce_to_string(activation).ok());
+            if name.is_some_and(|n| n.to_utf8_lossy() == "controller")
+                && let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcPadMenu")
+                && let Err(e) = c.call_public_property(
+                    AvmString::new_utf8(activation.gc(), "openFrom"),
+                    super::function::FunctionArgs::from_slice(&[receiver]),
+                    activation,
+                )
+            {
+                tracing::warn!("SMBC SmbcPadMenu.openFrom failed: {e:?}");
+            }
+            return Hook::Pass;
+        }
         WideFn::SetMapSkin => {
             let v = args.to_slice().first().copied().unwrap_or(Value::Undefined);
             if let Some(gs) = game_class(activation, "com.smbc.data.GameSettings") {
@@ -266,7 +301,8 @@ pub fn call<'gc>(
         | WideFn::CheatsLoaded
         | WideFn::TitleCtor
         | WideFn::TitleMapSkin
-        | WideFn::MapSkinChanged => return Hook::Post,
+        | WideFn::MapSkinChanged
+        | WideFn::OptionsLoadItems => return Hook::Post,
         _ => {}
     }
     if f == WideFn::RandomCharPick {
@@ -390,7 +426,12 @@ pub fn call<'gc>(
         | WideFn::TitleMapSkin
         | WideFn::MapSkinChanged
         | WideFn::GsLoadData
-        | WideFn::SetMapSkin => Hook::Pass,
+        | WideFn::SetMapSkin
+        | WideFn::OptionsLoadItems
+        | WideFn::OptionsChoose
+        | WideFn::PadSetKeys
+        | WideFn::PadCapture
+        | WideFn::PadPoll => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
@@ -723,6 +764,20 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activ
         }
         return;
     }
+    if f == WideFn::OptionsLoadItems {
+        if let Some(items) = ret.filter(|v| v.as_object().is_some()) {
+            let entry = ArrayObject::from_storage(
+                activation.context,
+                ArrayStorage::from_args(&[AvmString::new_utf8(activation.gc(), "controller").into()]),
+            );
+            let _ = items.call_public_property(
+                AvmString::new_utf8(activation.gc(), "splice"),
+                super::function::FunctionArgs::from_slice(&[Value::Number(1.0), Value::Number(0.0), entry.into()]),
+                activation,
+            );
+        }
+        return;
+    }
     if f == WideFn::GraphicsLoadItems {
         remove_menu_item(ret, "Random Map Skin", activation);
         return;
@@ -1041,4 +1096,39 @@ pub fn save_redirect<'gc>(activation: &mut Activation<'_, 'gc>, file_ref: Value<
         tracing::warn!("SMBC SmbcSaves.{method} failed: {e:?}");
     }
     true
+}
+
+/// The game's Controller menu (AS3 `SmbcPad`): set the key each pad button
+/// sends, and capture a pad press for assigning.
+fn pad_native<'gc>(
+    f: WideFn,
+    args: super::function::FunctionArgs<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    use crate::input::{SMBC_PAD_CAPTURE, SMBC_PAD_KEYS, SMBC_PAD_LAST};
+    use std::sync::atomic::Ordering;
+    let a = args.to_slice();
+    match f {
+        WideFn::PadSetKeys => {
+            let mut keys = [0u32; 14];
+            if let Some(arr) = a.first().copied().filter(|v| v.as_object().is_some()) {
+                for (i, k) in keys.iter_mut().enumerate() {
+                    let v = arr.get_public_property(AvmString::new_utf8(activation.gc(), i.to_string()), activation)?;
+                    *k = v.coerce_to_i32(activation)?.max(0) as u32;
+                }
+            }
+            if let Ok(mut g) = SMBC_PAD_KEYS.lock() {
+                *g = Some(keys);
+            }
+            Ok(Value::Undefined)
+        }
+        WideFn::PadCapture => {
+            let on = a.first().copied().unwrap_or(Value::Undefined).coerce_to_boolean();
+            SMBC_PAD_LAST.store(-1, Ordering::Relaxed);
+            SMBC_PAD_CAPTURE.store(on, Ordering::Relaxed);
+            Ok(Value::Undefined)
+        }
+        WideFn::PadPoll => Ok(Value::Integer(SMBC_PAD_LAST.swap(-1, Ordering::Relaxed))),
+        _ => Ok(Value::Undefined),
+    }
 }

@@ -94,7 +94,44 @@ pub struct InputManager {
     key_code_mapping_type: KeyCodeMappingType,
 }
 
+/// SMBC: controller mapping set by the game's Controller menu (replaces the
+/// launch-time mapping while set), indexed like `SMBC_PAD_BUTTONS`.
+pub static SMBC_PAD_KEYS: std::sync::Mutex<Option<[u32; 14]>> = std::sync::Mutex::new(None);
+/// SMBC: while true, gamepad button presses are recorded in
+/// `SMBC_PAD_LAST` (as an index into `SMBC_PAD_BUTTONS`) instead of becoming
+/// key presses.
+pub static SMBC_PAD_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static SMBC_PAD_LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+pub const SMBC_PAD_BUTTONS: [GamepadButton; 14] = [
+    GamepadButton::South,
+    GamepadButton::East,
+    GamepadButton::North,
+    GamepadButton::West,
+    GamepadButton::LeftTrigger,
+    GamepadButton::LeftTrigger2,
+    GamepadButton::RightTrigger,
+    GamepadButton::RightTrigger2,
+    GamepadButton::Select,
+    GamepadButton::Start,
+    GamepadButton::DPadUp,
+    GamepadButton::DPadDown,
+    GamepadButton::DPadLeft,
+    GamepadButton::DPadRight,
+];
+
 impl InputManager {
+    /// The key a gamepad button stands for (the game's Controller menu
+    /// mapping if set, else the launch-time one).
+    fn smbc_pad_key(&self, button: GamepadButton) -> Option<KeyCode> {
+        if let Ok(guard) = SMBC_PAD_KEYS.lock()
+            && let Some(keys) = guard.as_ref()
+        {
+            let i = SMBC_PAD_BUTTONS.iter().position(|b| *b == button)?;
+            return (keys[i] != 0).then(|| KeyCode::from_code(keys[i]));
+        }
+        self.gamepad_button_mapping.get(&button).copied()
+    }
+
     pub fn new(gamepad_button_mapping: HashMap<GamepadButton, KeyCode>) -> Self {
         Self {
             keys_down_phys_loc: HashSet::new(),
@@ -137,10 +174,17 @@ impl InputManager {
         let event = match event {
             // Optionally transform gamepad button events into key events.
             PlayerEvent::GamepadButtonDown { button } => {
+                use std::sync::atomic::Ordering;
+                if SMBC_PAD_CAPTURE.load(Ordering::Relaxed) {
+                    if let Some(i) = SMBC_PAD_BUTTONS.iter().position(|b| *b == button) {
+                        SMBC_PAD_LAST.store(i as i32, Ordering::Relaxed);
+                    }
+                    return None;
+                }
                 #[allow(clippy::question_mark)]
-                if let Some(key_code) = self.gamepad_button_mapping.get(&button) {
+                if let Some(key_code) = self.smbc_pad_key(button) {
                     InputEvent::KeyDown {
-                        key_code: *key_code,
+                        key_code,
                         key_char: None,
                         // TODO what location should we use here?
                         key_location: KeyLocation::Standard,
@@ -152,9 +196,9 @@ impl InputManager {
             }
             PlayerEvent::GamepadButtonUp { button } => {
                 #[allow(clippy::question_mark)]
-                if let Some(key_code) = self.gamepad_button_mapping.get(&button) {
+                if let Some(key_code) = self.smbc_pad_key(button) {
                     InputEvent::KeyUp {
-                        key_code: *key_code,
+                        key_code,
                         key_char: None,
                         // TODO what location should we use here?
                         key_location: KeyLocation::Standard,
