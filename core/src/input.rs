@@ -102,6 +102,10 @@ pub static SMBC_PAD_KEYS: std::sync::Mutex<Option<[u32; 14]>> = std::sync::Mutex
 /// key presses.
 pub static SMBC_PAD_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static SMBC_PAD_LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// SMBC: pad buttons currently held (bit per `SMBC_PAD_BUTTONS` index). A
+/// press of a button already held (a controller seen twice by Windows reports
+/// every press twice) is not a new press for capturing.
+pub static SMBC_PAD_HELD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub const SMBC_PAD_BUTTONS: [GamepadButton; 14] = [
     GamepadButton::South,
     GamepadButton::East,
@@ -175,8 +179,15 @@ impl InputManager {
             // Optionally transform gamepad button events into key events.
             PlayerEvent::GamepadButtonDown { button } => {
                 use std::sync::atomic::Ordering;
+                let index = SMBC_PAD_BUTTONS.iter().position(|b| *b == button);
+                let was_held = index.is_some_and(|i| {
+                    SMBC_PAD_HELD.fetch_or(1 << i, Ordering::Relaxed) & (1 << i) != 0
+                });
                 if SMBC_PAD_CAPTURE.load(Ordering::Relaxed) {
-                    if let Some(i) = SMBC_PAD_BUTTONS.iter().position(|b| *b == button) {
+                    if let Some(i) = index
+                        && !was_held
+                    {
+                        tracing::info!("SMBC controller menu: pad button {button:?} pressed");
                         SMBC_PAD_LAST.store(i as i32, Ordering::Relaxed);
                     }
                     return None;
@@ -195,6 +206,9 @@ impl InputManager {
                 }
             }
             PlayerEvent::GamepadButtonUp { button } => {
+                if let Some(i) = SMBC_PAD_BUTTONS.iter().position(|b| *b == button) {
+                    SMBC_PAD_HELD.fetch_and(!(1 << i), std::sync::atomic::Ordering::Relaxed);
+                }
                 #[allow(clippy::question_mark)]
                 if let Some(key_code) = self.smbc_pad_key(button) {
                     InputEvent::KeyUp {

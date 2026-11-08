@@ -418,7 +418,26 @@ impl MainWindow {
 
         // Drain every pending gamepad event (stick motion produces many).
         let mut gilrs = gilrs;
-        while let Some(Event { event, .. }) = gilrs.as_mut().and_then(|g| g.next_event()) {
+        while let Some(Event { id, event, .. }) = gilrs.as_mut().and_then(|g| g.next_event()) {
+            // Which controllers Windows reports, and what each button press
+            // arrives as, for diagnosing controller layouts.
+            match event {
+                EventType::Connected => {
+                    if let Some(g) = gilrs.as_ref().map(|g| g.gamepad(id)) {
+                        tracing::info!(
+                            "Controller {id} connected: {:?} (mapping: {:?}, vendor {:04x?} product {:04x?})",
+                            g.name(),
+                            g.mapping_source(),
+                            g.vendor_id(),
+                            g.product_id()
+                        );
+                    }
+                }
+                EventType::ButtonPressed(button, code) => {
+                    tracing::info!("Controller {id}: {button:?} pressed (code {code})");
+                }
+                _ => {}
+            }
             match event {
                 EventType::AxisChanged(Axis::LeftStickX, value, _) => {
                     self.stick_axes[0] = value;
@@ -534,6 +553,17 @@ impl App {
                 tracing::warn!("Gamepad support could not be initialized: {err}");
             })
             .ok();
+        if let Some(g) = &gilrs {
+            for (id, pad) in g.gamepads() {
+                tracing::info!(
+                    "Controller {id}: {:?} (mapping: {:?}, vendor {:04x?} product {:04x?})",
+                    pad.name(),
+                    pad.mapping_source(),
+                    pad.vendor_id(),
+                    pad.product_id()
+                );
+            }
+        }
         let event_loop_proxy = event_loop.create_proxy();
         let runtime = tokio::runtime::Runtime::new()?;
 
