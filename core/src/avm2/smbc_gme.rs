@@ -93,7 +93,8 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 33] = [
+const WIDE: [WideFn; 34] = [
+    WideFn::CreateLevel,
     WideFn::OptionsLoadItems,
     WideFn::OptionsChoose,
     WideFn::PadSetKeys,

@@ -111,6 +111,10 @@ pub enum WideFn {
     PadCapture,
     /// `SmbcPad.nativePoll()` (replace): the button pressed while capturing, or -1.
     PadPoll,
+    /// `ScreenManager.createLevel()` (pre): in the single character modes,
+    /// `SmbcStageSkin.intercept` shows the map skin menu before a new stage
+    /// and runs createLevel itself when it closes.
+    CreateLevel,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -147,6 +151,7 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.messageBoxes::SmbcPad$/nativeCapture()" => WideFn::PadCapture,
         "com.smbc.messageBoxes::SmbcPad$/nativePoll()" => WideFn::PadPoll,
         "com.smbc.messageBoxes::OptionsMenu/chooseItem()" => WideFn::OptionsChoose,
+        "com.smbc.managers::ScreenManager/createLevel()" => WideFn::CreateLevel,
         n if n.starts_with("com.smbc.messageBoxes::OptionsMenu/") && n.ends_with("loadItems()") => {
             WideFn::OptionsLoadItems
         }
@@ -272,6 +277,22 @@ pub fn call<'gc>(
         }
         WideFn::PadSetKeys | WideFn::PadCapture | WideFn::PadPoll => {
             return Hook::Replace(pad_native(f, args, activation));
+        }
+        WideFn::CreateLevel => {
+            let id = args.to_slice().first().copied().unwrap_or(Value::Undefined);
+            let handled = game_class(activation, "com.smbc.messageBoxes.SmbcStageSkin").and_then(|c| {
+                c.call_public_property(
+                    AvmString::new_utf8(activation.gc(), "intercept"),
+                    super::function::FunctionArgs::from_slice(&[receiver, id]),
+                    activation,
+                )
+                .inspect_err(|e| tracing::warn!("SMBC SmbcStageSkin.intercept failed: {e:?}"))
+                .ok()
+            });
+            if handled.is_some_and(|v| v.coerce_to_boolean()) {
+                return Hook::Replace(Ok(Value::Undefined));
+            }
+            return Hook::Pass;
         }
         WideFn::OptionsChoose => {
             let name = args.to_slice().first().copied().and_then(|v| v.coerce_to_string(activation).ok());
@@ -431,7 +452,8 @@ pub fn call<'gc>(
         | WideFn::OptionsChoose
         | WideFn::PadSetKeys
         | WideFn::PadCapture
-        | WideFn::PadPoll => Hook::Pass,
+        | WideFn::PadPoll
+        | WideFn::CreateLevel => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
             set(receiver, "x", off, activation);
