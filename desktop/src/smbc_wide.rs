@@ -33,6 +33,35 @@ pub fn width_for_display(w: u32, h: u32) -> u32 {
 /// Size of the primary monitor, if it can be found.
 #[cfg(windows)]
 pub fn primary_display_size() -> Option<(u32, u32)> {
+    // The monitor the game window will open on: Windows puts a new window on
+    // the monitor of the window in front when it starts (the Explorer
+    // window that launched it), so use that one; else the one under the
+    // mouse; else the primary monitor.
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL,
+        MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut mon = if fg.is_null() { std::ptr::null_mut() } else { MonitorFromWindow(fg, MONITOR_DEFAULTTONULL) };
+        if mon.is_null() {
+            let mut pt = POINT { x: 0, y: 0 };
+            GetCursorPos(&mut pt);
+            mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+        }
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !mon.is_null() && GetMonitorInfoW(mon, &mut info) != 0 {
+            let w = (info.rcMonitor.right - info.rcMonitor.left) as u32;
+            let h = (info.rcMonitor.bottom - info.rcMonitor.top) as u32;
+            if w > 0 && h > 0 {
+                tracing::info!("widescreen: launch monitor is {w}x{h}");
+                return Some((w, h));
+            }
+        }
+    }
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
     let (w, h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     (w > 0 && h > 0).then_some((w as u32, h as u32))
