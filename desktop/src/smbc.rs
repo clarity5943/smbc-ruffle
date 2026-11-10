@@ -146,7 +146,7 @@ pub fn build_args() -> Vec<OsString> {
             .unwrap_or(crate::smbc_wide::ORIGINAL_WIDTH),
         n => n
             .parse::<u32>()
-            .map(|w| (w / 16 * 16).clamp(crate::smbc_wide::ORIGINAL_WIDTH, 2048))
+            .map(|w| ((w + 16) / 32 * 32).clamp(crate::smbc_wide::ORIGINAL_WIDTH, 2048))
             .unwrap_or(crate::smbc_wide::ORIGINAL_WIDTH),
     };
     let mut movie = swf.clone();

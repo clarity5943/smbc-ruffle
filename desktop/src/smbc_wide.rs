@@ -20,13 +20,16 @@ pub const ORIGINAL_WIDTH: u32 = 512;
 const HEIGHT: u32 = 480;
 
 /// Stage width for a display of the given size: 480 px high, same aspect
-/// ratio, rounded to a multiple of 16 (the game's tile size).
+/// ratio, rounded to a multiple of 32 (the level tile size).
 pub fn width_for_display(w: u32, h: u32) -> u32 {
     if w == 0 || h == 0 {
         return ORIGINAL_WIDTH;
     }
     let exact = HEIGHT as f64 * w as f64 / h as f64;
-    let rounded = ((exact / 16.0).round() * 16.0) as u32;
+    // A whole number of 32 px tiles: the level adds tile columns at
+    // "left tile + screen width", looked up by multiples of 32, so any other
+    // width leaves the right side of the level empty (848 for 16:9 did).
+    let rounded = ((exact / 32.0).round() * 32.0) as u32;
     rounded.clamp(ORIGINAL_WIDTH, 2048)
 }
 
