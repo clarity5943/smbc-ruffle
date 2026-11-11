@@ -24,6 +24,7 @@ unsafe extern "C" {
     fn gme_seek(e: *mut MusicEmu, msec: c_int) -> *const c_char;
     fn gme_set_fade(e: *mut MusicEmu, start_msec: c_int);
     fn gme_set_tempo(e: *mut MusicEmu, tempo: f64);
+    fn gme_ignore_silence(e: *mut MusicEmu, ignore: c_int);
     fn gme_set_stereo_depth(e: *mut MusicEmu, depth: f64);
     fn gme_track_count(e: *const MusicEmu) -> c_int;
 }
@@ -87,6 +88,9 @@ impl Emu {
     }
     pub fn set_fade(&mut self, msec: i32) {
         unsafe { gme_set_fade(self.0, msec) }
+    }
+    pub fn ignore_silence(&mut self, ignore: bool) {
+        unsafe { gme_ignore_silence(self.0, ignore as c_int) }
     }
     pub fn set_tempo(&mut self, t: f64) {
         unsafe { gme_set_tempo(self.0, t) }
