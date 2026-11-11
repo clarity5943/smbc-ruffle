@@ -115,6 +115,9 @@ pub enum WideFn {
     /// `SmbcStageSkin.intercept` shows the map skin menu before a new stage
     /// and runs createLevel itself when it closes.
     CreateLevel,
+    /// `Level.loadNewLevel()` (pre): `SmbcSaves.leavingLevel(level, id)`
+    /// notes whether the next level start is progress (for the autosave).
+    LevelLeave,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -152,6 +155,7 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.messageBoxes::SmbcPad$/nativePoll()" => WideFn::PadPoll,
         "com.smbc.messageBoxes::OptionsMenu/chooseItem()" => WideFn::OptionsChoose,
         "com.smbc.managers::ScreenManager/createLevel()" => WideFn::CreateLevel,
+        n if n.starts_with("com.smbc.level::Level/") && n.ends_with("loadNewLevel()") => WideFn::LevelLeave,
         n if n.starts_with("com.smbc.messageBoxes::OptionsMenu/") && n.ends_with("loadItems()") => {
             WideFn::OptionsLoadItems
         }
@@ -277,6 +281,19 @@ pub fn call<'gc>(
         }
         WideFn::PadSetKeys | WideFn::PadCapture | WideFn::PadPoll => {
             return Hook::Replace(pad_native(f, args, activation));
+        }
+        WideFn::LevelLeave => {
+            let id = args.to_slice().first().copied().unwrap_or(Value::Undefined);
+            if let Some(c) = game_class(activation, "com.smbc.messageBoxes.SmbcSaves")
+                && let Err(e) = c.call_public_property(
+                    AvmString::new_utf8(activation.gc(), "leavingLevel"),
+                    super::function::FunctionArgs::from_slice(&[receiver, id]),
+                    activation,
+                )
+            {
+                tracing::warn!("SMBC SmbcSaves.leavingLevel failed: {e:?}");
+            }
+            return Hook::Pass;
         }
         WideFn::CreateLevel => {
             let id = args.to_slice().first().copied().unwrap_or(Value::Undefined);
@@ -453,6 +470,7 @@ pub fn call<'gc>(
         | WideFn::PadSetKeys
         | WideFn::PadCapture
         | WideFn::PadPoll
+        | WideFn::LevelLeave
         | WideFn::CreateLevel => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
@@ -813,6 +831,17 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activ
             )
         {
             tracing::warn!("SMBC autosave failed: {e:?}");
+        }
+        // Bench only: finish the first few stages at once (autosave test).
+        thread_local!(static BEAT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+        if std::env::var_os("SMBC_TEST_BEAT").is_some()
+            && let Some(c) = game_class(activation, "com.smbc.level.Level")
+            && let Ok(lev) = c.get_public_property(AvmString::new_utf8(activation.gc(), "levelInstance"), activation)
+            && lev.as_object().is_some_and(|o| o.instance_class().name().local_name().to_utf8_lossy() == "Level")
+            && BEAT.with(|b| { b.set(b.get() + 1); b.get() <= 2 })
+        {
+            let r = lev.set_public_property(AvmString::new_utf8(activation.gc(), "beatLevel"), Value::Bool(true), activation);
+            tracing::warn!("SMBC test beat: {r:?}");
         }
         return;
     }
