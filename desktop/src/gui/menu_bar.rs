@@ -75,19 +75,13 @@ impl MenuBar {
             }
         }
 
-        let mut fullscreen_pressed =
-            egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN));
-        if cfg!(windows) && !fullscreen_pressed {
-            // TODO We can remove this shortcut when we add some kind of preferences.
-            fullscreen_pressed = egui_ctx
-                .input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN_WINDOWS));
-        }
-        if let Some(player) = &mut player
-            && fullscreen_pressed
-        {
-            let is_fullscreen = player.is_fullscreen();
-            player.set_fullscreen(!is_fullscreen);
-        }
+        // F11 / Alt+Enter are handled in MainWindow::window_event (SMBC port).
+        // Toggling here as well flipped fullscreen twice for one key press
+        // whenever this ran after that handler's toggle.
+        let _ = egui_ctx.input_mut(|input| {
+            input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN)
+                || input.consume_shortcut(&Self::SHORTCUT_FULLSCREEN_WINDOWS)
+        });
     }
 
     pub fn show(
