@@ -1,3 +1,5 @@
+> **This is the `smbc-native` branch of smbc-ruffle**, a Ruffle fork that runs *Super Mario Bros. Crossover* as a native game. See [SMBC.md](SMBC.md). The rest of this README is Ruffle's own.
+
 <p align="center">
   <a href="https://ruffle.rs"><img alt="Ruffle" src="https://ruffle.rs/logo.svg" /></a>
 </p>
