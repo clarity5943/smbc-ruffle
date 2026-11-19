@@ -57,6 +57,8 @@ presses and takes screenshots.
 ## Licenses
 
 Ruffle is MIT / Apache-2.0 (see `LICENSE.md`). game-music-emu in `smbc_gme/gme`
-is LGPL 2.1 (see `smbc_gme/LICENSE.md`). *Super Mario Bros. Crossover* is by
+is LGPL 2.1 or later (see `smbc_gme/gme/license.txt`). The Rust bindings in
+`smbc_gme` are based on the MIT-licensed `game-music-emu` crate (see
+`smbc_gme/LICENSE.md`). *Super Mario Bros. Crossover* is by
 Exploding Rabbit; its characters belong to Nintendo and their other owners. This
 project isn't affiliated with any of them.
