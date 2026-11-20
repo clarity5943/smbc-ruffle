@@ -93,7 +93,17 @@ pub enum Override {
     Wide(WideFn),
 }
 
-const WIDE: [WideFn; 35] = [
+const WIDE: [WideFn; 45] = [
+    WideFn::RandomNewGame,
+    WideFn::RandomContinue,
+    WideFn::RandomMenuChoose,
+    WideFn::RandomMenuItems,
+    WideFn::RandomWorldCount,
+    WideFn::RandomLevelName,
+    WideFn::RandomNpc,
+    WideFn::RandomBeatStatus,
+    WideFn::RandomSetActive,
+    WideFn::RandomCopyId,
     WideFn::LevelLeave,
     WideFn::CreateLevel,
     WideFn::OptionsLoadItems,

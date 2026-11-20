@@ -118,6 +118,25 @@ pub enum WideFn {
     /// `Level.loadNewLevel()` (pre): `SmbcSaves.leavingLevel(level, id)`
     /// notes whether the next level start is progress (for the autosave).
     LevelLeave,
+    /// "Random" map set (`SmbcRandom`, AS3): `EventManager.startNewGame` (pre).
+    RandomNewGame,
+    /// `StatManager.continueAfterDyingHandler` (post).
+    RandomContinue,
+    /// `NewGameOptionsMenu.chooseItem` (pre + post for "Map Set").
+    RandomMenuChoose,
+    /// `NewGameOptionsMenu.loadItems` (post).
+    RandomMenuItems,
+    /// `LevelData.worldCount` getter (replaced while a run is active).
+    RandomWorldCount,
+    /// `LevelID.nameWithoutAreaDisplay` getter (replaced while active).
+    RandomLevelName,
+    /// `NPC()` (post, while active): Toad or the princess.
+    RandomNpc,
+    /// `StatManager.setBeatGameStatus` (skipped while active).
+    RandomBeatStatus,
+    /// `SmbcRandom.nativeSetActive` / `nativeCopyLevelID` stubs.
+    RandomSetActive,
+    RandomCopyId,
     /// `CharacterSelectBox.pressedSelectCharacterButton()` and
     /// `GraphicsOptions.chooseItem()` (post): open `SmbcMapSkinMenu` (the map
     /// skin menu with a "Random" choice, added to the SWF by tools/patch_swf.py)
@@ -156,6 +175,20 @@ pub fn classify(name: &str) -> Option<WideFn> {
         "com.smbc.messageBoxes::OptionsMenu/chooseItem()" => WideFn::OptionsChoose,
         "com.smbc.managers::ScreenManager/createLevel()" => WideFn::CreateLevel,
         n if n.starts_with("com.smbc.level::Level/") && n.ends_with("loadNewLevel()") => WideFn::LevelLeave,
+        "com.smbc.managers::EventManager/startNewGame()" => WideFn::RandomNewGame,
+        "com.smbc.managers::StatManager/continueAfterDyingHandler()" => WideFn::RandomContinue,
+        "com.smbc.messageBoxes::NewGameOptionsMenu/chooseItem()" => WideFn::RandomMenuChoose,
+        n if n.starts_with("com.smbc.messageBoxes::NewGameOptionsMenu/") && n.ends_with("loadItems()") => {
+            WideFn::RandomMenuItems
+        }
+        "com.smbc.level::LevelData/get worldCount()" => WideFn::RandomWorldCount,
+        "com.smbc.data::LevelID/get nameWithoutAreaDisplay()" => WideFn::RandomLevelName,
+        "com.smbc.graphics::NPC()" => WideFn::RandomNpc,
+        n if n.starts_with("com.smbc.managers::StatManager/") && n.ends_with("setBeatGameStatus()") => {
+            WideFn::RandomBeatStatus
+        }
+        "com.smbc.messageBoxes::SmbcRandom$/nativeSetActive()" => WideFn::RandomSetActive,
+        "com.smbc.messageBoxes::SmbcRandom$/nativeCopyLevelID()" => WideFn::RandomCopyId,
         n if n.starts_with("com.smbc.messageBoxes::OptionsMenu/") && n.ends_with("loadItems()") => {
             WideFn::OptionsLoadItems
         }
@@ -271,6 +304,12 @@ pub fn call<'gc>(
     if f == WideFn::MapSkinMenuSwap {
         return Hook::Post;
     }
+    if let Some(h) = random_call(f, receiver, args, activation) {
+        return h;
+    }
+    if f == WideFn::LayerScroll && std::env::var_os("SMBC_TEST_AXE").is_some() {
+        test_axe(activation);
+    }
     match f {
         WideFn::SaveRead | WideFn::SaveWrite | WideFn::SaveSetFileData | WideFn::SaveClearFileRef => {
             return Hook::Replace(save_native(f, args, activation));
@@ -297,6 +336,9 @@ pub fn call<'gc>(
         }
         WideFn::CreateLevel => {
             let id = args.to_slice().first().copied().unwrap_or(Value::Undefined);
+            if RANDOM_ACTIVE.with(|a| a.get()) {
+                as3_call(activation, "com.smbc.messageBoxes.SmbcRandom", "redirect", &[id]);
+            }
             let handled = game_class(activation, "com.smbc.messageBoxes.SmbcStageSkin").and_then(|c| {
                 c.call_public_property(
                     AvmString::new_utf8(activation.gc(), "intercept"),
@@ -471,6 +513,16 @@ pub fn call<'gc>(
         | WideFn::PadCapture
         | WideFn::PadPoll
         | WideFn::LevelLeave
+        | WideFn::RandomNewGame
+        | WideFn::RandomContinue
+        | WideFn::RandomMenuChoose
+        | WideFn::RandomMenuItems
+        | WideFn::RandomWorldCount
+        | WideFn::RandomLevelName
+        | WideFn::RandomNpc
+        | WideFn::RandomBeatStatus
+        | WideFn::RandomSetActive
+        | WideFn::RandomCopyId
         | WideFn::CreateLevel => Hook::Pass,
         WideFn::BlackScreen => {
             let off = hud_offset(activation);
@@ -783,6 +835,9 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activ
         LOADING_SAVE_SETTINGS.with(|l| l.set(false));
         return;
     }
+    if random_post(f, receiver, ret, activation) {
+        return;
+    }
     let global = match f {
         WideFn::MsgBoxDestroy | WideFn::CheatUnlock => Some("save"),
         WideFn::CheatsLoaded => Some("afterSaveLoaded"),
@@ -832,6 +887,9 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activ
         {
             tracing::warn!("SMBC autosave failed: {e:?}");
         }
+        if std::env::var_os("SMBC_TEST_CHEATS").is_some() {
+            test_cheats(activation);
+        }
         // Bench only: finish the first few stages at once (autosave test).
         thread_local!(static BEAT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
         if std::env::var_os("SMBC_TEST_BEAT").is_some()
@@ -846,7 +904,14 @@ pub fn post<'gc>(f: WideFn, receiver: Value<'gc>, ret: Option<Value<'gc>>, activ
         return;
     }
     if f == WideFn::BlackScreen {
-        hide_end_text(receiver, activation);
+        if RANDOM_ACTIVE.with(|a| a.get())
+            && let Some(tfc) = get_any(receiver, "worldDispTfc", activation).filter(|v| v.as_object().is_some())
+        {
+            as3_call(activation, "com.smbc.messageBoxes.SmbcRandom", "decorateBlackScreen", &[receiver, tfc]);
+        }
+        if stage_width(activation) > ORIGINAL_WIDTH {
+            hide_end_text(receiver, activation);
+        }
         return;
     }
     if f == WideFn::WaterHazeCtor {
@@ -1182,4 +1247,175 @@ fn pad_native<'gc>(
         WideFn::PadPoll => Ok(Value::Integer(SMBC_PAD_LAST.swap(-1, Ordering::Relaxed))),
         _ => Ok(Value::Undefined),
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// "Random" map set. The run's logic is in AS3 (`SmbcRandom`); these hooks
+// call it and keep a native copy of "a run is active" so the getters that
+// run all the time cost nothing outside a run.
+
+thread_local! {
+    static RANDOM_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+const RANDOM_CLASS: &str = "com.smbc.messageBoxes.SmbcRandom";
+
+/// Call a public static of a class added to (or part of) the game.
+fn as3_call<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    class: &str,
+    method: &'static str,
+    args: &[Value<'gc>],
+) -> Option<Value<'gc>> {
+    let c = game_class(activation, class)?;
+    c.call_public_property(
+        AvmString::new_utf8(activation.gc(), method),
+        super::function::FunctionArgs::from_slice(args),
+        activation,
+    )
+    .inspect_err(|e| tracing::warn!("SMBC {class}.{method} failed: {e:?}"))
+    .ok()
+}
+
+fn random_call<'gc>(
+    f: WideFn,
+    receiver: Value<'gc>,
+    args: super::function::FunctionArgs<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Option<Hook<'gc>> {
+    let active = RANDOM_ACTIVE.with(|a| a.get());
+    let a = args.to_slice();
+    Some(match f {
+        WideFn::RandomSetActive => {
+            let on = a.first().is_some_and(|v| v.coerce_to_boolean());
+            RANDOM_ACTIVE.with(|r| r.set(on));
+            Hook::Replace(Ok(Value::Undefined))
+        }
+        WideFn::RandomCopyId => {
+            if let (Some(&dst), Some(&src)) = (a.first(), a.get(1))
+                && dst.as_object().is_some()
+                && src.as_object().is_some()
+            {
+                for field in ["_world", "_stage", "_area", "_nameWithoutArea", "_fullName"] {
+                    if let Some(v) = get_any(src, field, activation) {
+                        set_any(dst, field, v, activation);
+                    }
+                }
+            }
+            Hook::Replace(Ok(Value::Undefined))
+        }
+        WideFn::RandomNewGame => {
+            as3_call(activation, RANDOM_CLASS, "newGame", &[]);
+            // Bench only: start the run at another stage (0 = 1-1, 31 = 8-4).
+            // "31" or "31:0.1.4" (also replace that stage with SMB 1-4).
+            if let Ok(v) = std::env::var("SMBC_TEST_RANDOM_INDEX") {
+                let (i, force) = v.split_once(':').unwrap_or((v.as_str(), ""));
+                let force = AvmString::new_utf8(activation.gc(), force);
+                as3_call(activation, RANDOM_CLASS, "testStart", &[Value::Number(i.parse().unwrap_or(0.0)), force.into()]);
+            }
+            Hook::Pass
+        }
+        WideFn::RandomContinue | WideFn::RandomMenuItems => Hook::Post,
+        WideFn::RandomNpc if active => Hook::Post,
+        WideFn::RandomMenuChoose => {
+            let name = a.first().and_then(|v| v.coerce_to_string(activation).ok());
+            if name.is_some_and(|n| n.to_utf8_lossy() == "Map Set") {
+                let tfc = a.get(2).copied().unwrap_or(Value::Null);
+                let dir = a.get(3).copied().unwrap_or(Value::Undefined);
+                as3_call(activation, RANDOM_CLASS, "beforeMapPack", &[tfc, dir]);
+                Hook::Post
+            } else {
+                Hook::Pass
+            }
+        }
+        WideFn::RandomWorldCount if active => {
+            let real = get_any(receiver, "_worldCount", activation).unwrap_or(Value::Number(8.0));
+            let v = as3_call(activation, RANDOM_CLASS, "worldCount", &[real]).unwrap_or(real);
+            Hook::Replace(Ok(v))
+        }
+        WideFn::RandomLevelName if active => {
+            match as3_call(activation, RANDOM_CLASS, "displayName", &[]) {
+                Some(v) => Hook::Replace(Ok(v)),
+                None => Hook::Pass,
+            }
+        }
+        WideFn::RandomBeatStatus if active => Hook::Replace(Ok(Value::Undefined)),
+        WideFn::RandomNpc
+        | WideFn::RandomWorldCount
+        | WideFn::RandomLevelName
+        | WideFn::RandomBeatStatus => Hook::Pass,
+        WideFn::BlackScreen if active && stage_width(activation) <= ORIGINAL_WIDTH => Hook::Post,
+        _ => return None,
+    })
+}
+
+/// True when `f` was a Random hook (handled here).
+fn random_post<'gc>(
+    f: WideFn,
+    receiver: Value<'gc>,
+    ret: Option<Value<'gc>>,
+    activation: &mut Activation<'_, 'gc>,
+) -> bool {
+    match f {
+        WideFn::RandomContinue => {
+            as3_call(activation, RANDOM_CLASS, "continued", &[]);
+        }
+        WideFn::RandomMenuItems => {
+            if let Some(items) = ret.filter(|v| v.as_object().is_some()) {
+                as3_call(activation, RANDOM_CLASS, "fixNewGameItems", &[items]);
+            }
+        }
+        WideFn::RandomMenuChoose => {
+            as3_call(activation, RANDOM_CLASS, "afterMapPack", &[]);
+        }
+        WideFn::RandomNpc => {
+            as3_call(activation, RANDOM_CLASS, "fixNpc", &[receiver]);
+        }
+        WideFn::TitleCtor => {
+            as3_call(activation, RANDOM_CLASS, "reset", &[]);
+            return false;
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Bench only (SMBC_TEST_AXE): in a castle, put the player by the axe and
+/// take it, once per level, a second after the level starts.
+fn test_axe<'gc>(activation: &mut Activation<'_, 'gc>) {
+    thread_local!(static AXE: std::cell::Cell<(usize, u32)> = const { std::cell::Cell::new((0, 0)) });
+    let Some(c) = game_class(activation, "com.smbc.level.Level") else { return };
+    let Ok(lev) = c.get_public_property(AvmString::new_utf8(activation.gc(), "levelInstance"), activation) else { return };
+    let Some(lo) = lev.as_object() else { return };
+    let key = lo.as_ptr() as usize;
+    let n = AXE.with(|a| {
+        let (k, n) = a.get();
+        let n = if k == key { n + 1 } else { 0 };
+        a.set((key, n));
+        n
+    });
+    if n != 120 {
+        return;
+    }
+    let (Some(axe), Some(player)) = (
+        get(lev, "bowserAxe", activation).filter(|v| v.as_object().is_some()),
+        get(lev, "player", activation).filter(|v| v.as_object().is_some()),
+    ) else {
+        return;
+    };
+    let ax = get(axe, "x", activation).map(|v| num(v, activation)).unwrap_or(0.0);
+    let ay = get(axe, "y", activation).map(|v| num(v, activation)).unwrap_or(0.0);
+    set(player, "x", ax - 24.0, activation);
+    set(player, "y", ay, activation);
+    for p in ["nx", "ny"] {
+        let v = if p == "nx" { ax - 24.0 } else { ay };
+        let _ = player.set_public_property(AvmString::new_utf8(activation.gc(), p), Value::Number(v), activation);
+    }
+    let r = player.call_public_property(
+        AvmString::new_utf8(activation.gc(), "getAxe"),
+        super::function::FunctionArgs::from_slice(&[axe]),
+        activation,
+    );
+    tracing::warn!("SMBC test axe at {ax},{ay}: {r:?}");
 }

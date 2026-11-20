@@ -25,6 +25,11 @@ file, placed next to the exe as `game\smbc3.swf`.
   (`core/src/input.rs`).
 - **Launcher mode** (`desktop/src/smbc.rs`): starts the bundled game directly,
   remembers fullscreen, F11 / Alt+Enter toggle fullscreen.
+- **Random map set:** New Game > Map Set: Random plays a 32-stage run with
+  each stage picked at random from SMB, Special and Lost Levels (same stage
+  number, castles for -4, no repeats), ending after the run's 8-4. The run's
+  logic is ActionScript (`SmbcRandom`); the hooks are the `Random*` entries
+  in `smbc_wide.rs`.
 - **Fixes:** Samus explosion halves, random character skin, map skin choice
   between stages, and the end of SNES songs being cut off.
 
